@@ -606,6 +606,12 @@ class PostgresConnWrapper:
 
 def get_db_connection():
     """Universal connection factory: connects to PostgreSQL if configured, otherwise SQLite."""
+    global IS_POSTGRES, POSTGRES_URL
+    current_pg_url = resolve_postgres_url()
+    if current_pg_url:
+        IS_POSTGRES = True
+        POSTGRES_URL = current_pg_url
+
     if IS_POSTGRES:
         parsed = urlparse(POSTGRES_URL)
         is_local = parsed.hostname in ('localhost', '127.0.0.1', None)
@@ -629,8 +635,9 @@ def get_db_connection():
         # 2. Try pg8000 fallback (pure Python)
         if HAVE_PG8000:
             import ssl
-            user = parsed.username or 'postgres'
-            password = parsed.password or ''
+            from urllib.parse import unquote
+            user = unquote(parsed.username or 'postgres')
+            password = unquote(parsed.password or '')
             host = parsed.hostname or 'localhost'
             port = int(parsed.port or 5432)
             database = (parsed.path or '/postgres').lstrip('/')
@@ -1027,6 +1034,43 @@ def get_session():
             'is_admin': session.get('role') == 'ADMIN'
         })
     return jsonify({'logged_in': False, 'role': 'public'})
+
+
+@app.route('/api/db-status', methods=['GET'])
+def get_db_status():
+    """Diagnostic route to check whether app is running on PostgreSQL or SQLite."""
+    global IS_POSTGRES, POSTGRES_URL
+    current_pg_url = resolve_postgres_url()
+    is_pg = bool(current_pg_url)
+    
+    info = {
+        'database_type': 'PostgreSQL' if is_pg else 'SQLite',
+        'is_serverless': IS_SERVERLESS,
+        'postgres_configured': is_pg,
+        'connection_healthy': False,
+        'driver': None,
+        'error': None
+    }
+    
+    if is_pg:
+        try:
+            parsed = urlparse(current_pg_url)
+            info['host'] = parsed.hostname
+            info['database'] = (parsed.path or '').lstrip('/')
+        except Exception:
+            pass
+
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        conn.close()
+        info['connection_healthy'] = True
+        info['driver'] = 'psycopg2' if (is_pg and HAVE_PSYCOPG2) else ('pg8000' if (is_pg and HAVE_PG8000) else 'sqlite3')
+    except Exception as e:
+        info['error'] = str(e)
+
+    return jsonify(info)
 
 
 @app.route('/api/login', methods=['POST'])
