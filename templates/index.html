@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="mr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <meta name="referrer" content="strict-origin-when-cross-origin" />
+  <title>वावेलवाडी Village - अधिकृत ग्राम पोर्टल</title>
+  <meta name="description" content="वावेलवाडी गाव - निसर्गसमृद्धी, इतिहास, संस्कृती, सण, व्लॉग आणि ग्रामविकास" />
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}" />
+</head>
+<body>
+
+  <!-- ==========================================
+       HEADER & NAVIGATION BAR
+       ========================================== -->
+  <header class="header-navbar">
+    <div class="container navbar-wrapper">
+
+      <!-- Hamburger for mobile -->
+      <button class="mobile-toggle" id="mobileMenuToggle" aria-label="Menu">☰</button>
+
+      <a href="#" class="navbar-brand">
+        <div class="brand-emblem">व</div>
+        <div>
+          <span style="font-family: var(--font-mr-title);">वावेलवाडी</span>
+          <span style="font-size: 0.7rem; display: block; color: var(--text-light); font-weight: 500;">WAVELVADI VILLAGE</span>
+        </div>
+      </a>
+
+      <!-- Navigation Links -->
+      <ul class="nav-links" id="navLinksMenu">
+        <li><a href="#hero" class="nav-link active" id="navHomeText">मुख्य पृष्ठ</a></li>
+        <li><a href="#history" class="nav-link" id="navHistoryText">इतिहास</a></li>
+        <li><a href="#culture" class="nav-link" id="navCultureText">संस्कृती</a></li>
+        <li><a href="#vlogs" class="nav-link" id="navVlogsText">व्लॉग</a></li>
+        <li><a href="#gallery" class="nav-link" id="navGalleryText">गॅलरी</a></li>
+        <li><a href="#notices" class="nav-link" id="navNoticesText">सूचना</a></li>
+        <li><a href="#development" class="nav-link" id="navDevText">विकास व निधी</a></li>
+      </ul>
+
+      <!-- Navbar Right Actions -->
+      <div class="nav-actions">
+        <button id="langToggleBtn" class="lang-switch-btn" title="भाषा बदला / Switch Language">
+          🌐 <span id="langToggleText">English</span>
+        </button>
+
+        <button onclick="openModal('creatorRequestModal')" class="btn btn-secondary nav-btn-sm">
+          ✍️ <span id="btnCreatorReqTextNav">क्रिएटर अर्ज</span>
+        </button>
+
+        <button id="navLoginBtn" onclick="openModal('loginModal')" class="btn btn-primary nav-btn-sm">
+          🔐 <span id="navLoginText">प्रवेश (Login)</span>
+        </button>
+
+        <button id="navDashboardBtn" onclick="openAdminDashboard()" class="btn btn-king nav-btn-sm" style="display: none;">
+          🛡️ Portal
+        </button>
+
+        <button id="addContentBtn" onclick="openModal('addContentModal')" class="btn btn-gold nav-btn-sm" style="display: none;">
+          + नवीन जोडणी
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- ==========================================
+       HERO SECTION
+       ========================================== -->
+  <section id="hero" class="hero-section">
+    <div class="container hero-grid">
+      <div class="hero-content">
+        <div class="hero-badge">
+          <span></span> <span id="heroTagText">• सह्याद्रीचा अभिमान •</span>
+        </div>
+        <h1 class="hero-title" id="heroTitleText">
+          आपले सहर्ष स्वागत! <span class="highlight">वावेलवाडी गाव</span>
+        </h1>
+        <p class="hero-description" id="heroDescText">
+          सह्याद्रीच्या डोंगररांगांमध्ये वसलेले, निसर्गरम्य वातावरण, समृद्ध वारसा, सेंद्रिय शेती आणि एकोप्याची परंपरा जपणारे आणि महिलांचा सन्मान करणारा आदर्श महासंस्कृती गाव वावेलवाडी.
+        </p>
+
+        <div class="hero-cta-group">
+          <a href="#culture" class="btn btn-primary btn-lg" id="btnExploreText">गाव भ्रमंती करा</a>
+          <button onclick="openModal('creatorRequestModal')" class="btn btn-secondary btn-lg" id="btnCreatorReqText">
+            क्रिएटर बना (परवानगी अर्ज)
+          </button>
+        </div>
+
+        <!-- Village Quick Stats -->
+        <div class="hero-stats">
+          <div class="stat-item">
+            <span class="stat-number" id="statPopText">१५०+</span>
+            <span class="stat-label" id="statPopLabel">ग्रामस्थ लोकसंख्या</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-number" id="statAreaText">१,२०० हेक्टर</span>
+            <span class="stat-label" id="statAreaLabel">निसर्गरम्य परिसर</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-number" id="statHeritageText">३००+ वर्षे</span>
+            <span class="stat-label" id="statHeritageLabel">ऐतिहासिक परंपरा</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Hero Visual -->
+      <div class="hero-image-wrapper">
+        <img src="{{ url_for('static', filename='images/hero_wavelvadi.svg') }}" alt="वावेलवाडी निसर्ग व कमान" />
+        <div class="floating-card">
+          <div class="floating-icon">👑</div>
+          <div>
+            <strong style="display: block; font-size: 0.95rem; color: var(--brand-brown);">मुख्य प्रशासक: ADMIN</strong>
+            <small style="color: var(--text-light);">अधिकृत सुरक्षित डिजिटल पोर्टल</small>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==========================================
+       VILLAGE HISTORY SECTION
+       ========================================== -->
+  <section id="history" class="culture-section">
+    <div class="container">
+      <div class="section-header">
+        <span class="section-tag" id="historyTagText">इतिहास आणि वारसा</span>
+        <h2 class="section-title" id="historyTitleText">वावेलवाडीचा इतिहास</h2>
+        <p class="section-subtitle" id="historyDescText">
+          सह्याद्रीच्या कुशीत अधिक वर्षांपासून वसलेल्या वावेलवाडी गावाला ऐतिहासिक बारव विहिरी, पराक्रमी पूर्वज आणि जलव्यवस्थापनाचा गौरवशाली वारसा लाभला आहे.
+        </p>
+      </div>
+
+      <div class="culture-grid">
+        <div class="culture-card">
+          <div class="culture-card-icon">🏛️</div>
+          <h3 class="culture-card-title">ऐतिहासिक बारव विहीर</h3>
+          <p class="culture-card-text">
+            मराठा काळातील दगडी कोरीव काम असणारी बारव विहीर आजही गावातील पाण्याची गरज पूर्ण करते आणि स्थापत्यकलेचा उत्कृष्ट नमुना आहे.
+          </p>
+        </div>
+
+        <div class="culture-card">
+          <div class="culture-card-icon">🌾</div>
+          <h3 class="culture-card-title">सेंद्रिय भातशेती वारसा</h3>
+          <p class="culture-card-text">
+            वावेलवाडीतील आंबेमोहर भाताचा सुगंध आणि सेंद्रिय शेतीची पद्धत संपूर्ण जिल्ह्यात प्रसिद्ध असून पिढ्यानपिढ्या जतन केली गेली आहे.
+          </p>
+        </div>
+
+        <div class="culture-card">
+          <div class="culture-card-icon">🤝</div>
+          <h3 class="culture-card-title">एकोपा व सहकार्य</h3>
+          <p class="culture-card-text">
+            गावातील प्रत्येक सार्वजनिक उपक्रम आणि सण सर्व ग्रामस्थ एकत्र येऊन तंटामुक्त पद्धतीने साजरे करतात.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==========================================
+       CULTURE & TRADITIONS SECTION
+       ========================================== -->
+  <section id="culture" class="vlog-section" style="background-color: var(--bg-cream);">
+    <div class="container">
+      <div class="section-header">
+        <span class="section-tag" id="cultureTagText">संस्कृती आणि सण</span>
+        <h2 class="section-title" id="cultureTitleText">वावेलवाडीची समृद्ध परंपरा</h2>
+        <p class="section-subtitle" id="cultureDescText">
+          शिमगा उत्सव, श्री राधाकृष्ण पालखी उत्सव, श्री गणेश चतुर्थी उत्सव, नवरात्रोत्सव आणि दीपावली.
+        </p>
+      </div>
+
+      <div class="card-grid">
+        <div class="content-card">
+          <div class="card-media-wrapper">
+            <img src="{{ url_for('static', filename='images/Shimga.jpeg') }}" alt="शिमगा उत्सव" />
+            <span class="media-badge">CULTURE</span>
+          </div>
+          <div class="card-body">
+            <div class="card-meta">
+              <span>📅 वार्षिक उत्सव</span>
+              <span>🛡️ ADMIN Approved</span>
+            </div>
+            <h3 class="card-title">शिमगा उत्सव</h3>
+            <p class="card-text">
+              होळी प्रज्वलन, पारंपरिक खेळ, लोककला आणि सांस्कृतिक कार्यक्रमांनी शिमग्याचा उत्सव मोठ्या उत्साहात साजरा केला जातो.
+            <div class="card-author">✍️ वावेलवाडी मंडळ</div>
+          </div>
+        </div>
+
+        <div class="content-card">
+          <div class="card-media-wrapper">
+            <img src="{{ url_for('static', filename='images/ShriKrishna.jpeg') }}" alt="श्री राधाकृष्ण पालखी उत्सव" />
+            <span class="media-badge">CULTURE</span>
+          </div>
+          <div class="card-body">
+            <div class="card-meta">
+              <span>📅 वार्षिक उत्सव</span>
+              <span>🛡️ ADMIN Approved</span>
+            </div>
+            <h3 class="card-title">श्री राधाकृष्ण पालखी उत्सव</h3>
+            <p class="card-text">
+              ताशांचा गजर, लेझिम पथक आणि पालखी सोहळा. गावातील सर्वात मोठा पारंपरिक उत्सव.
+            </p>
+            <div class="card-author">✍️ वावेलवाडी मंडळ</div>
+          </div>
+        </div>
+
+        <div class="content-card">
+          <div class="card-media-wrapper">
+            <img src="{{ url_for('static', filename='images/ShriGanesh.jpeg') }}" alt="श्री गणेश चतुर्थी उत्सव" />
+            <span class="media-badge">CULTURE</span>
+          </div>
+          <div class="card-body">
+            <div class="card-meta">
+              <span>📅 वार्षिक उत्सव</span>
+              <span>🛡️ ADMIN Approved</span>
+            </div>
+            <h3 class="card-title">श्री गणेश चतुर्थी उत्सव</h3>
+            <p class="card-text">
+              गणरायाचे आगमन, मंगलमय आरती आणि भक्तिमय वातावरण. गावातील सर्वांना एकत्र आणणारा आनंदाचा पारंपरिक उत्सव.
+            </p>
+            <div class="card-author">✍️ वावेलवाडी मंडळ</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==========================================
+       VLOGS & VILLAGE STORIES SECTION
+       ========================================== -->
+  <section id="vlogs" class="vlog-section">
+    <div class="container">
+      <div class="section-header">
+        <span class="section-tag" id="vlogTagText">ग्राम कथा व व्लॉग</span>
+        <h2 class="section-title" id="vlogTitleText">वावेलवाडीतील जीवन व व्लॉग</h2>
+        <p class="section-subtitle" id="vlogDescText">
+          आमच्या अधिकृत स्थानिक क्रिएटर मंडळींनी टिपलेले निसर्गरम्य व्हिडिओ आणि जीवनशैली कथा.
+        </p>
+      </div>
+
+      <div id="vlogsContainer" class="card-grid">
+        <!-- Loaded via JavaScript API -->
+      </div>
+    </div>
+  </section>
+
+  <!-- ==========================================
+       PHOTO & VIDEO GALLERY SECTION
+       ========================================== -->
+  <section id="gallery" class="gallery-section">
+    <div class="container">
+      <div class="section-header">
+        <span class="section-tag" id="galleryTagText">छायाचित्र व व्हिडिओ दालन</span>
+        <h2 class="section-title" id="galleryTitleText">वावेलवाडी मीडिया गॅलरी</h2>
+      </div>
+
+      <!-- Filter Buttons -->
+      <div class="filter-container">
+        <button class="filter-btn active" onclick="loadPublicContent('all')" id="filterAllBtn">सर्व</button>
+        <button class="filter-btn" onclick="loadPublicContent('culture')" id="filterCultureBtn">संस्कृती</button>
+        <button class="filter-btn" onclick="loadPublicContent('vlog')" id="filterVlogBtn">व्लॉग</button>
+        <button class="filter-btn" onclick="loadPublicContent('photo')" id="filterPhotoBtn">फोटो</button>
+        <button class="filter-btn" onclick="loadPublicContent('video')" id="filterVideoBtn">व्हिडिओ</button>
+      </div>
+
+      <div id="galleryContainer" class="card-grid">
+        <!-- Loaded via JavaScript API -->
+      </div>
+    </div>
+  </section>
+
+  <!-- ==========================================
+       VILLAGE ANNOUNCEMENTS & NOTICEBOARD
+       ========================================== -->
+  <section id="notices" class="notice-section">
+    <div class="container">
+      <div class="section-header">
+        <span class="section-tag" id="noticeTagText">जाहीर बातमीपत्र</span>
+        <h2 class="section-title" id="noticeTitleText">ग्रामपंचायत सूचना फलक</h2>
+      </div>
+
+      <div class="notice-box">
+        <div id="noticeContainer" class="notice-list">
+          <!-- Loaded via JavaScript API -->
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==========================================
+       FUTURE VILLAGE DEVELOPMENT & PAYMENT SECTION
+       ========================================== -->
+  <section id="development" class="development-section">
+    <div class="container dev-grid">
+      <div class="dev-info">
+        <span class="section-tag" style="background: rgba(255,255,255,0.1); border-color: rgba(255,255,255,0.2); color: #FBBF24;" id="devTagText">भविष्यकालीन ग्रामविकास</span>
+        <h2 id="devTitleText">वावेलवाडी प्रगती व विकास प्रकल्प</h2>
+        <p id="devDescText">
+          वावेलवाडी गावाच्या उज्वल भविष्यासाठी सौर पथदिवे, हाय-स्पीड संगणक वाचनालय आणि शुद्ध जलशुद्धीकरण प्रकल्प हाती घेतले जात आहेत.
+        </p>
+
+        <div class="dev-project-list">
+          <div class="dev-project-item">
+            <div class="dev-project-icon">🫂</div>
+            <div>
+              <strong style="display:block; color:#FFF;">गावातले Star</strong>
+              <small style="color:#A8A29E;">गावातल्या पोरांनी बनवलेला कन्टेन्ट.....</small>
+            </div>
+          </div>
+          <div class="dev-project-item">
+            <div class="dev-project-icon">💥</div>
+            <div>
+              <strong style="color:#FFF;">Funny Reels..</strong>
+              <small style="color:#A8A29E;">🤣🤣🤣🤣🤣</small>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Instagram Official Connect & QR Code Box -->
+      <div class="payment-card" style="border: 2px solid #E1306C; box-shadow: 0 10px 30px rgba(225, 48, 108, 0.15);">
+        <span class="payment-card-badge" style="background: linear-gradient(45deg, #f09433, #e6683c, #dc2743, #cc2366, #bc1888); color: #FFF; border: none;" id="devBadgeText">📸 अधिकृत इंस्टाग्राम (Official Instagram)</span>
+        <h3 style="font-size: 1.4rem; color: var(--brand-brown); margin-bottom: 0.5rem;" id="igCardTitle">वावेलवाडी अधिकृत Instagram</h3>
+        <p style="font-size: 0.875rem; color: var(--text-muted);" id="igCardDesc">
+          गावातील सण, संस्कृती, निसर्ग, दैनिक व्लॉग आणि विकास प्रकल्पांचे रील्स पाहण्यासाठी आमचे इंस्टाग्राम पेज फॉलो करा.
+        </p>
+
+        <div class="qr-wrapper" style="width: 200px; height: 200px; border-color: #E1306C;">
+          <img src="{{ url_for('static', filename='images/image.png') }}" alt="Instagram QR Code" id="igQrImg" />
+        </div>
+
+        <div class="upi-box" style="background: linear-gradient(135deg, #833ab4, #fd1d1d, #fcb045); color: #FFF; border: none; font-size: 1rem; letter-spacing: 0.5px;">
+          <span id="igHandleText">📸 ID: @vavelwadi_diary</span>
+        </div>
+
+        <div style="margin-top: 1rem;">
+          <a href="https://www.instagram.com/vavelwadi_diary?utm_source=ig_web_button_share_sheet&stkn=ZDNlZDc0MzIxNw%3D%3D" target="_blank" rel="noopener noreferrer" class="btn" style="background: linear-gradient(45deg, #405DE6, #5851DB, #833AB4, #C13584, #E1306C, #FD1D1D); color: #FFF; width: 100%; display: block; text-decoration: none; font-weight: bold; padding: 0.75rem 1rem; border-radius: var(--radius-sm); text-align: center; box-shadow: 0 4px 12px rgba(225, 48, 108, 0.35);">
+            👉 इंस्टाग्रामवर फॉलो करा (Follow Us)
+          </a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==========================================
+       CREATOR & CONTRIBUTOR SECTION
+       ========================================== -->
+  <section class="creator-section">
+    <div class="container">
+      <div class="section-header">
+        <span class="section-tag" id="creatorTagText">आमचे योगदानकर्ते</span>
+        <h2 class="section-title" id="creatorTitleText">वावेलवाडी अधिकृत लेखक व क्रिएटर</h2>
+        <p class="section-subtitle" id="creatorDescText">
+          ADMIN प्रशासकाकडून पडताळणी व मंजुरी मिळालेले अधिकृत ग्राम क्रिएटर.
+        </p>
+      </div>
+
+      <div class="creator-grid" id="creatorsGrid">
+        
+      </div>
+    </div>
+  </section>
+
+  <!-- ==========================================
+       FOOTER SECTION
+       ========================================== -->
+  <footer class="site-footer">
+    <div class="container">
+      <div class="footer-grid">
+        <div>
+          <h3 class="footer-brand-title">वावेलवाडी/WAVELVADI</h3>
+          <p style="font-size: 0.9rem; line-height: 1.6; color:#FFF;">
+            सह्याद्रीच्या कुशीतील निसर्गरम्य आणि समृद्ध परंपरा असणारे आदर्श गाव. सर्व हक्क राखीव.
+          </p>
+        </div>
+        <div>
+          <h4 style="color:#FFF; margin-bottom: 1rem;">नेव्हिगेशन</h4>
+          <ul class="footer-link-list">
+            <li><a href="#hero">मुख्य पृष्ठ</a></li>
+            <li><a href="#history">इतिहास</a></li>
+            <li><a href="#culture">संस्कृती</a></li>
+            <li><a href="#vlogs">व्लॉग</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4 style="color:#FFF; margin-bottom: 1rem;">माहिती</h4>
+          <ul class="footer-link-list">
+            <li><a href="#notices">सूचना फलक</a></li>
+            <li><a href="#development">विकास निधी</a></li>
+            <li><a href="#" onclick="openModal('creatorRequestModal')">क्रिएटर नोंदणी</a></li>
+          </ul>
+        </div>
+        <div>
+          <h4 style="color:#FFF; margin-bottom: 1rem;">प्रशासकीय संपर्क</h4>
+          <p style="font-size: 0.85rem; color:#FFF;">
+            मुख्य प्रशासक: <strong>ADMIN</strong><br/>
+            ईमेल: <span style="color:#FBBF24;">king120360@gmail.com</span><br/>
+            पत्ता: मु. वावेलवाडी, पो. बागमांडला, ता. श्रीवर्धन.
+          </p>
+        </div>
+      </div>
+
+      <div class="footer-bottom">
+        <p>© 2026 Wavelvadi Village Portal. Designed &amp; Administered exclusively by <strong style="color:#FFF;"> I_AM_KING_0360 </strong>.</p>
+      </div>
+    </div>
+  </footer>
+
+  <!-- ==========================================
+       MODAL 1: CREATOR PERMISSION REQUEST FORM
+       ========================================== -->
+  <div id="creatorRequestModal" class="modal-overlay">
+    <div class="modal-container">
+      <button onclick="closeModal('creatorRequestModal')" class="modal-close-btn">&times;</button>
+      <h2 class="modal-title" id="modalReqTitleText">वावेलवाडी क्रिएटर नोंदणी अर्ज</h2>
+      <p style="font-size: 0.9rem; color: var(--text-muted); margin-bottom: 1.5rem;" id="modalReqDescText">
+        गावाची संस्कृती, व्लॉग, फोटो अथवा बातमी प्रसिद्ध करण्यासाठी मुख्य प्रशासक (ADMIN) कडून परवानगी मिळवा.
+        [Note:-Unique User id you want for login give in "Full Name" field.]
+        
+      </p>
+
+      <form id="creatorRequestForm">
+        <div class="form-group">
+          <label class="form-label" id="lblFullNameText"> नाव (or User ID)</label>
+          <input type="text" id="reqFullName" class="form-input" placeholder="eg., Harsh Niwate(i_am_king_0360)" required />
+        </div>
+        <div class="form-group">
+          <label class="form-label" id="lblEmailText">ईमेल पत्ता(OTP on Email)</label>
+          <input type="email" id="reqEmail" class="form-input" placeholder="king120360@gmail.com" required />
+        </div>
+        <div class="form-group">
+          <label class="form-label" id="lblPhoneText">मोबाईल नंबर</label>
+          <input type="tel" id="reqPhone" class="form-input" placeholder="+91 23xxx xxxx9" />
+        </div>
+        <div class="form-group">
+          <label class="form-label" id="lblReasonText">आपण काय योगदान देऊ इच्छिता? (कारण)</label>
+          <textarea id="reqReason" class="form-textarea" rows="3" placeholder="eg., I want to share videos and photos of the village's agricultural activities." required></textarea>
+        </div>
+        <div class="form-group">
+          <label class="form-label" id="lblInstaText">📸 Instagram प्रोफाईल लिंक किंवा आयडी (ऐच्छिक / Optional)</label>
+          <input type="text" id="reqInstagram" class="form-input" placeholder="eg., https://instagram.com/your_handle किंवा @your_handle" />
+        </div>
+        <button type="submit" class="btn btn-primary" style="width: 100%;" id="btnSendReqText">
+          ADMIN कडे अर्ज पाठवा
+        </button>
+        <div id="reqMsg" style="margin-top: 1rem; font-size: 0.9rem; text-align: center;"></div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ==========================================
+       MODAL 2: LOGIN MODAL (ADMIN / CREATOR)
+       ========================================== -->
+  <div id="loginModal" class="modal-overlay">
+    <div class="modal-container">
+      <button onclick="closeModal('loginModal')" class="modal-close-btn">&times;</button>
+      <h2 class="modal-title" id="modalLoginTitleText">प्रवेश (ADMIN / Creator Auth)</h2>
+      <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1.5rem;">
+        सुरक्षित प्रवेश. ADMIN प्रशासक किंवा मंजूर झालेले क्रिएटर येथे लॉगिन करू शकतात.
+      </p>
+
+      <form id="loginForm">
+        <div class="form-group">
+          <label class="form-label" id="lblUsernameText">युजर आयडी (Username)</label>
+          <input type="text" id="loginUsername" class="form-input" placeholder="ADMIN किंवा क्रिएटर आयडी" required />
+        </div>
+        <div class="form-group">
+          <label class="form-label" id="lblPasswordText">पासकोड (Passkey)</label>
+          <div style="position: relative;">
+            <input type="password" id="loginPassword" class="form-input" placeholder="••••••••" required />
+            <button type="button" onclick="togglePasswordVisibility('loginPassword')" class="pwd-toggle-btn">👁</button>
+          </div>
+        </div>
+        <button type="submit" class="btn btn-gold" style="width: 100%;" id="btnLoginSubmitText">
+          सुरक्षित प्रवेश करा
+        </button>
+        <div id="loginMsg" style="margin-top: 1rem; font-size: 0.9rem; text-align: center;"></div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ==========================================
+       MODAL 3: ADD CONTENT (ADMIN ONLY)
+       ========================================== -->
+  <div id="addContentModal" class="modal-overlay">
+    <div class="modal-container" style="max-width: 680px;">
+      <button onclick="closeModal('addContentModal')" class="modal-close-btn">&times;</button>
+      <h2 class="modal-title">नवीन माहिती / व्लॉग जोडा</h2>
+      <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1.5rem;" id="addContentModalNote">
+        📌 <strong>ADMIN:</strong> थेट प्रसिद्ध करू शकतात. | <strong>क्रिएटर:</strong> सादर केलेला मजकूर ADMIN च्या ईमेल मान्यतेनंतर पोर्टलवर प्रसिद्ध होईल.
+      </p>
+
+      <form id="addContentForm">
+        <div class="form-row">
+          <div class="form-group">
+            <label class="form-label">शीर्षक (मराठी) *</label>
+            <input type="text" name="title_mr" class="form-input" placeholder="उदा. वावेलवाडीतील सकाळचे सौंदर्य" required />
+          </div>
+          <div class="form-group">
+            <label class="form-label">Title (English)</label>
+            <input type="text" name="title_en" class="form-input" placeholder="Morning Beauty of Wavelvadi" />
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">वर्गवारी (Category) *</label>
+          <select name="category" class="form-select">
+            <option value="vlog">व्लॉग (Vlog)</option>
+            <option value="culture">संस्कृती (Culture)</option>
+            <option value="photo">फोटो (Photo)</option>
+            <option value="video">व्हिडिओ (Video)</option>
+            <option value="notice">सूचना (Notice)</option>
+            <option value="future_dev">विकास प्रकल्प (Development)</option>
+            <option value="history">इतिहास (History)</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">तपशील (मराठी)</label>
+          <textarea name="description_mr" class="form-textarea" rows="2" placeholder="माहितीचा संक्षिप्त तपशील ..."></textarea>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Description (English)</label>
+          <textarea name="description_en" class="form-textarea" rows="2" placeholder="Short description in English..."></textarea>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">🎬 YouTube Link (YouTubers साठी)</label>
+          <input type="url" name="youtube_url" class="form-input" placeholder="https://www.youtube.com/watch?v=..." />
+          <small style="color: var(--text-light);">फक्त YouTubers साठी - YouTube व्हिडिओ लिंक जोडा</small>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">📁 मीडिया अपलोड करा (फोटो / व्हिडिओ)</label>
+          <input type="file" name="media_file" id="mediaFileInput" class="form-input" accept="image/*,video/*" />
+          <div id="uploadPreview" style="margin-top: 0.75rem; display: none;"></div>
+        </div>
+
+        <div class="form-group" style="display: flex; align-items: center; gap: 0.75rem;" id="publishNowGroup">
+          <input type="checkbox" name="publish_now" value="true" id="publishNowCheck" />
+          <label for="publishNowCheck" style="font-weight: 600; color: var(--brand-brown); cursor: pointer;">
+            आत्ताच सार्वजनिक करा (Publish Now - ADMIN Only)
+          </label>
+        </div>
+
+        <button type="submit" class="btn btn-primary" style="width: 100%;">
+          📤 कंटेंट सबमिट करा
+        </button>
+        <div id="submitMsg" style="margin-top: 1rem; font-size: 0.9rem; text-align: center;"></div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ==========================================
+       MODAL 4: ADMIN & CREATOR DASHBOARD PORTAL
+       ========================================== -->
+  <div id="dashboardModal" class="modal-overlay">
+    <div class="modal-container dashboard-modal-container">
+      <button onclick="closeModal('dashboardModal')" class="modal-close-btn">&times;</button>
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 1rem; flex-wrap: wrap; gap: 0.5rem;">
+        <h2 class="modal-title" style="margin:0;">🛡️ ADMIN &amp; क्रिएटर पोर्टल</h2>
+        <button onclick="handleLogout()" class="btn" style="background:#FEE2E2; color:#991B1B; padding:0.4rem 0.8rem; font-size:0.8rem;">Logout</button>
+      </div>
+
+      <!-- Dashboard Tabs -->
+      <div class="admin-tab-bar">
+        <button onclick="loadAdminTab('drafts')" class="admin-tab active">📋 कंटेंट डेटाबेस</button>
+        <button onclick="loadAdminTab('requests')" class="admin-tab">📨 क्रिएटर अर्ज</button>
+        <button onclick="loadAdminTab('creators')" class="admin-tab" id="creatorsTabBtn" style="display:none;">👥 क्रिएटर व्यवस्थापन</button>
+        <button onclick="loadAdminTab('backup')" class="admin-tab" id="backupTabBtn" style="display:none;">☁️ बॅकअप स्टोरेज</button>
+        <button onclick="loadAdminTab('googlescript')" class="admin-tab" id="gscriptTabBtn" style="display:none;">⚙️ Google Script</button>
+      </div>
+
+      <div id="dashboardContent" style="min-height: 250px;">
+        <!-- Loaded via JS -->
+      </div>
+    </div>
+  </div>
+
+  <!-- ==========================================
+       MODAL 5: APPROVE CREATOR - SET USERNAME & PASSWORD
+       ========================================== -->
+  <div id="approveCreatorModal" class="modal-overlay">
+    <div class="modal-container" style="max-width: 480px;">
+      <button onclick="closeModal('approveCreatorModal')" class="modal-close-btn">&times;</button>
+      <h2 class="modal-title">✅ क्रिएटर मंजुरी द्या</h2>
+      <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1.5rem;">
+        क्रिएटरसाठी Username आणि Password सेट करा (रिकामे सोडल्यास आपोआप तयार होईल).
+      </p>
+
+      <input type="hidden" id="approveReqId" />
+      <form id="approveCreatorForm">
+        <div class="form-group">
+          <label class="form-label">Username (युजर आयडी)</label>
+          <input type="text" id="customUsername" class="form-input" placeholder="उदा. rahul_wavelvadi" />
+          <small style="color: var(--text-light);">रिकामे सोडल्यास auto-generate होईल</small>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Password (पासकोड)</label>
+          <div style="position: relative;">
+            <input type="text" id="customPassword" class="form-input" placeholder="उदा. Wavelvadi@123" />
+          </div>
+          <small style="color: var(--text-light);">रिकामे सोडल्यास auto-generate होईल</small>
+        </div>
+        <button type="submit" class="btn btn-primary" style="width: 100%;">
+          ✅ मंजुरी द्या आणि Credentials पाठवा
+        </button>
+        <div id="approveMsg" style="margin-top: 1rem; font-size: 0.9rem; text-align: center;"></div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ==========================================
+       MODAL 6: ADD / EDIT CREATOR & FESTIVAL IMAGE
+       ========================================== -->
+  <div id="creatorProfileModal" class="modal-overlay">
+    <div class="modal-container" style="max-width: 520px;">
+      <button onclick="closeModal('creatorProfileModal')" class="modal-close-btn">&times;</button>
+      <h2 class="modal-title" id="creatorModalTitle">📸 क्रिएटर व सण-उत्सव प्रोफाईल</h2>
+      <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1.25rem;">
+        क्रिएटरचे नाव, सण/उत्सव किंवा प्रोफाईल फोटो, आणि थेट Instagram प्रोफाईल लिंक जोडा.
+      </p>
+
+      <form id="creatorProfileForm" onsubmit="handleCreatorProfileSubmit(event)">
+        <input type="hidden" id="creatorEditId" name="id" value="" />
+        <input type="hidden" id="creatorExistingImage" name="existing_image_url" value="" />
+
+        <div class="form-group">
+          <label class="form-label">👤 क्रिएटरचे नाव (Creator Name) *</label>
+          <input type="text" id="creatorInputName" name="name" class="form-input" placeholder="उदा. Harsh Niwate किंवा Santosh" required />
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">🏷️ पद / भूमिका (Role / Tag)</label>
+          <input type="text" id="creatorInputRole" name="role_title" class="form-input" placeholder="उदा. उत्सव व निसर्ग व्लॉगर / Festival Creator" />
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">📝 माहिती / बायो (Bio / Description)</label>
+          <textarea id="creatorInputBio" name="bio" class="form-textarea" rows="2" placeholder="उदा. गावातील शिमगोत्सव, गणेशोत्सव आणि संस्कृती व्लॉग..."></textarea>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">📸 क्रिएटर इमेज / सण-उत्सव फोटो अपलोड करा (Upload Image)</label>
+          <input type="file" id="creatorInputImage" name="image_file" class="form-input" accept="image/*" onchange="previewCreatorImage(event)" />
+          <div id="creatorImagePreviewWrap" style="margin-top: 0.75rem; display: none; text-align: center;">
+            <img id="creatorImagePreview" src="" alt="Preview" style="width: 100px; height: 100px; border-radius: 50%; object-fit: cover; border: 3px solid var(--brand-gold); box-shadow: 0 4px 12px rgba(180,83,9,0.2);" />
+            <div style="font-size: 0.75rem; color: var(--text-light); margin-top: 0.25rem;">निवडलेला फोटो / सण-उत्सव इमेज</div>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label">📷 Instagram प्रोफाईल लिंक किंवा आयडी (Instagram Link)</label>
+          <input type="text" id="creatorInputInsta" name="instagram_url" class="form-input" placeholder="उदा. https://www.instagram.com/username किंवा @username" />
+        </div>
+
+        <button type="submit" class="btn btn-primary" id="btnSaveCreator" style="width: 100%; margin-top: 0.5rem;">
+          💾 क्रिएटर माहिती सेव्ह करा (Save Creator)
+        </button>
+        <div id="creatorSaveMsg" style="margin-top: 0.75rem; font-size: 0.85rem; text-align: center;"></div>
+      </form>
+    </div>
+  </div>
+
+  <!-- ==========================================
+       MODAL 7: IN-WEBSITE VIDEO PLAYER MODAL
+       ========================================== -->
+  <div id="videoPlayerModal" class="modal-overlay">
+    <div class="modal-container video-modal-container">
+      <button onclick="closeVideoModal()" class="modal-close-btn">&times;</button>
+      <div class="video-modal-header">
+        <h3 id="videoModalTitle" class="video-modal-title">व्हिडिओ प्लेयर</h3>
+        <span class="media-badge yt-badge">VIDEO</span>
+      </div>
+      <div id="videoModalFrameContainer" class="video-modal-viewport"></div>
+      <div class="video-modal-footer">
+        <span class="video-modal-note">💡 टीप: व्हिडिओ प्ले करण्यास अडचण असल्यास YouTube वर पहा.</span>
+        <a id="videoModalDirectBtn" href="#" target="_blank" rel="noopener noreferrer" class="btn btn-primary btn-sm">
+          🎬 YouTube वर उघडा (Open on YouTube)
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <!-- JavaScript Assets -->
+  <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+</body>
+</html>

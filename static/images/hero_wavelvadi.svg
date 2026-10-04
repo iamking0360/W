@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 600" width="100%" height="100%">
+  <defs>
+    <linearGradient id="skyGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FEF3C7"/>
+      <stop offset="40%" stop-color="#FDE68A"/>
+      <stop offset="100%" stop-color="#F97316" stop-opacity="0.6"/>
+    </linearGradient>
+    <linearGradient id="hill1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#15803D"/>
+      <stop offset="100%" stop-color="#166534"/>
+    </linearGradient>
+    <linearGradient id="hill2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#047857"/>
+      <stop offset="100%" stop-color="#064E3B"/>
+    </linearGradient>
+    <linearGradient id="sunGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FBBF24"/>
+      <stop offset="100%" stop-color="#F59E0B"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Sky -->
+  <rect width="1200" height="600" fill="url(#skyGrad)"/>
+
+  <!-- Sun -->
+  <circle cx="600" cy="200" r="90" fill="url(#sunGrad)" opacity="0.9"/>
+  <circle cx="600" cy="200" r="120" fill="#FBBF24" opacity="0.25"/>
+
+  <!-- Sahyadri Mountains -->
+  <path d="M-50,450 Q200,200 450,400 T950,300 T1250,450 L1250,600 L-50,600 Z" fill="url(#hill2)" opacity="0.85"/>
+  <path d="M-50,490 Q300,280 600,430 T1250,480 L1250,600 L-50,600 Z" fill="url(#hill1)"/>
+
+  <!-- Fortified Village Arch (ग्रामप्रवेश कमान) -->
+  <g transform="translate(410, 260)">
+    <rect x="0" y="80" width="40" height="180" rx="4" fill="#78350F"/>
+    <rect x="340" y="80" width="40" height="180" rx="4" fill="#78350F"/>
+
+    <path d="M-10,80 Q190,-20 390,80 L380,110 Q190,20 0,110 Z" fill="#B45309"/>
+    <polygon points="190,-30 175,-10 205,-10" fill="#D97706"/>
+    <path d="M190,-30 L250,-15 L190,0 Z" fill="#EA580C"/>
+    <line x1="190" y1="-50" x2="190" y2="0" stroke="#78350F" stroke-width="4"/>
+
+    <rect x="40" y="110" width="300" height="48" rx="8" fill="#FFFBEB" stroke="#B45309" stroke-width="3"/>
+    <text x="190" y="141" font-family="'Yatra One', 'Noto Sans Devanagari', sans-serif" font-size="22" font-weight="bold" fill="#78350F" text-anchor="middle">शुभ स्वागतम् • वावेलवाडी</text>
+  </g>
+
+  <path d="M0,520 Q150,470 300,530 T600,510 T900,540 T1200,500 L1200,600 L0,600 Z" fill="#14532D"/>
+
+  <circle cx="200" cy="120" r="3" fill="#FFFBEB"/>
+  <circle cx="950" cy="140" r="4" fill="#FFFBEB"/>
+  <circle cx="1050" cy="90" r="3" fill="#FFFBEB"/>
+</svg>
