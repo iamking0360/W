@@ -15,6 +15,21 @@ from flask import Flask, render_template, request, jsonify, session, send_from_d
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
+from urllib.parse import urlparse
+
+# Optional PostgreSQL drivers
+try:
+    import psycopg2
+    import psycopg2.extras
+    HAVE_PSYCOPG2 = True
+except ImportError:
+    HAVE_PSYCOPG2 = False
+
+try:
+    import pg8000
+    HAVE_PG8000 = True
+except ImportError:
+    HAVE_PG8000 = False
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -31,6 +46,35 @@ app.config['MAX_CONTENT_LENGTH'] = int(os.getenv('MAX_CONTENT_LENGTH', 52428800)
 
 # Serverless detection (Vercel, Netlify, AWS Lambda)
 IS_SERVERLESS = bool(os.getenv('VERCEL') or os.getenv('NETLIFY') or os.getenv('AWS_LAMBDA_FUNCTION_NAME'))
+
+# PostgreSQL Detection & Configuration (Supabase, Neon, Render, Railway, AWS RDS, Vercel Postgres)
+def resolve_postgres_url():
+    url = (
+        os.getenv('DATABASE_URL') or
+        os.getenv('POSTGRES_URL') or
+        os.getenv('POSTGRES_PRISMA_URL') or
+        os.getenv('POSTGRES_URL_NON_POOLING') or
+        os.getenv('POSTGRESQL_URL') or
+        os.getenv('PGDATABASE_URL') or
+        ''
+    ).strip()
+
+    if not url:
+        pghost = os.getenv('PGHOST') or os.getenv('POSTGRES_HOST')
+        pguser = os.getenv('PGUSER') or os.getenv('POSTGRES_USER')
+        pgpassword = os.getenv('PGPASSWORD') or os.getenv('POSTGRES_PASSWORD', '')
+        pgdb = os.getenv('PGDATABASE') or os.getenv('POSTGRES_DB') or os.getenv('POSTGRES_DATABASE')
+        pgport = os.getenv('PGPORT') or os.getenv('POSTGRES_PORT') or '5432'
+        if pghost and pgdb and pguser:
+            url = f"postgresql://{pguser}:{pgpassword}@{pghost}:{pgport}/{pgdb}"
+
+    if url and url.startswith('postgres://'):
+        url = url.replace('postgres://', 'postgresql://', 1)
+
+    return url
+
+POSTGRES_URL = resolve_postgres_url()
+IS_POSTGRES = bool(POSTGRES_URL)
 
 if IS_SERVERLESS:
     UPLOAD_FOLDER = '/tmp/uploads'
@@ -49,6 +93,15 @@ else:
     app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
     _db_env = os.getenv('DATABASE_PATH', 'database.db')
     DATABASE_PATH = _db_env if os.path.isabs(_db_env) else os.path.join(app.root_path, _db_env)
+
+if IS_POSTGRES:
+    try:
+        parsed_pg = urlparse(POSTGRES_URL)
+        print(f"[DB INFO] Using PostgreSQL database: host={parsed_pg.hostname}, db={parsed_pg.path.lstrip('/')}")
+    except Exception:
+        print("[DB INFO] Using PostgreSQL database.")
+else:
+    print(f"[DB INFO] PostgreSQL URL not configured. Using local SQLite: {DATABASE_PATH}")
 
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp', 'mp4', 'webm', 'mov', 'pdf', 'doc', 'docx'}
 
@@ -370,48 +423,278 @@ def upload_to_google_drive(file_source, filename, mime_type):
 
 
 # ==========================================
-# DATABASE HELPER & MIGRATION
+# UNIVERSAL DATABASE ADAPTER (PostgreSQL & SQLite)
 # ==========================================
+class DictRow(dict):
+    """Dictionary-like row that supports attribute, key, and index access."""
+    def __init__(self, cols, vals):
+        super().__init__(zip(cols, vals))
+        self._vals = tuple(vals)
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self._vals[key]
+        return super().__getitem__(key)
+
+def adapt_sql(sql, is_postgres=IS_POSTGRES):
+    """Adapts SQL queries for PostgreSQL: fixes string quotes and converts ? to %s."""
+    # Convert double-quoted values (e.g. status = "approved") to single quotes
+    sql = re.sub(r'"(approved|rejected|published|draft|pending|synced|local)"', r"'\1'", sql)
+    if not is_postgres:
+        return sql
+    # Replace ? placeholders with %s outside string literals
+    parts = []
+    in_quote = False
+    quote_char = None
+    i = 0
+    while i < len(sql):
+        c = sql[i]
+        if c in ("'", '"'):
+            if not in_quote:
+                in_quote = True
+                quote_char = c
+                parts.append(c)
+            elif quote_char == c:
+                if i + 1 < len(sql) and sql[i + 1] == c:
+                    parts.append(c + c)
+                    i += 1
+                else:
+                    in_quote = False
+                    quote_char = None
+                    parts.append(c)
+            else:
+                parts.append(c)
+        elif c == '?' and not in_quote:
+            parts.append('%s')
+        else:
+            parts.append(c)
+        i += 1
+    return ''.join(parts)
+
+class PostgresCursorWrapper:
+    def __init__(self, raw_cur, raw_conn, driver='psycopg2'):
+        self._cur = raw_cur
+        self._conn = raw_conn
+        self._driver = driver
+        self.lastrowid = None
+
+    def execute(self, sql, params=None):
+        adapted = adapt_sql(sql, is_postgres=True)
+        is_insert = adapted.strip().upper().startswith('INSERT INTO')
+        has_returning = 'RETURNING' in adapted.upper()
+        
+        if is_insert and not has_returning:
+            sql_returning = adapted.rstrip().rstrip(';') + ' RETURNING id'
+            try:
+                if params is not None:
+                    self._cur.execute(sql_returning, params)
+                else:
+                    self._cur.execute(sql_returning)
+                
+                row = self._fetch_raw_row()
+                if row:
+                    if isinstance(row, dict):
+                        self.lastrowid = row.get('id') or next(iter(row.values()), None)
+                    elif isinstance(row, (list, tuple)):
+                        self.lastrowid = row[0]
+                return self
+            except Exception:
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
+
+        if params is not None:
+            self._cur.execute(adapted, params)
+        else:
+            self._cur.execute(adapted)
+        return self
+
+    def executemany(self, sql, params_list):
+        adapted = adapt_sql(sql, is_postgres=True)
+        self._cur.executemany(adapted, params_list)
+        return self
+
+    def _fetch_raw_row(self):
+        row = self._cur.fetchone()
+        if row is None:
+            return None
+        if self._driver == 'pg8000' and self._cur.description:
+            cols = [col[0] for col in self._cur.description]
+            return DictRow(cols, row)
+        return row
+
+    def fetchone(self):
+        return self._fetch_raw_row()
+
+    def fetchall(self):
+        rows = self._cur.fetchall()
+        if not rows:
+            return []
+        if self._driver == 'pg8000' and self._cur.description:
+            cols = [col[0] for col in self._cur.description]
+            return [DictRow(cols, r) for r in rows]
+        return rows
+
+    def fetchmany(self, size=None):
+        rows = self._cur.fetchmany(size) if size is not None else self._cur.fetchmany()
+        if not rows:
+            return []
+        if self._driver == 'pg8000' and self._cur.description:
+            cols = [col[0] for col in self._cur.description]
+            return [DictRow(cols, r) for r in rows]
+        return rows
+
+    @property
+    def rowcount(self):
+        return self._cur.rowcount
+
+    @property
+    def description(self):
+        return self._cur.description
+
+    def close(self):
+        try:
+            self._cur.close()
+        except Exception:
+            pass
+
+    def __iter__(self):
+        while True:
+            row = self.fetchone()
+            if row is None:
+                break
+            yield row
+
+class PostgresConnWrapper:
+    def __init__(self, raw_conn, driver='psycopg2'):
+        self._conn = raw_conn
+        self._driver = driver
+
+    def cursor(self):
+        if self._driver == 'psycopg2':
+            raw_cur = self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        else:
+            raw_cur = self._conn.cursor()
+        return PostgresCursorWrapper(raw_cur, self._conn, self._driver)
+
+    def execute(self, sql, params=None):
+        cur = self.cursor()
+        cur.execute(sql, params)
+        return cur
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if exc_type:
+            self.rollback()
+        else:
+            self.commit()
+        self.close()
+
 def get_db_connection():
+    """Universal connection factory: connects to PostgreSQL if configured, otherwise SQLite."""
+    if IS_POSTGRES:
+        parsed = urlparse(POSTGRES_URL)
+        is_local = parsed.hostname in ('localhost', '127.0.0.1', None)
+        
+        # 1. Try psycopg2
+        if HAVE_PSYCOPG2:
+            try:
+                if not is_local and 'sslmode' not in POSTGRES_URL.lower():
+                    raw = psycopg2.connect(POSTGRES_URL, sslmode='require')
+                else:
+                    raw = psycopg2.connect(POSTGRES_URL)
+                return PostgresConnWrapper(raw, driver='psycopg2')
+            except Exception as e:
+                try:
+                    raw = psycopg2.connect(POSTGRES_URL)
+                    return PostgresConnWrapper(raw, driver='psycopg2')
+                except Exception:
+                    if not HAVE_PG8000:
+                        raise e
+
+        # 2. Try pg8000 fallback (pure Python)
+        if HAVE_PG8000:
+            import ssl
+            user = parsed.username or 'postgres'
+            password = parsed.password or ''
+            host = parsed.hostname or 'localhost'
+            port = int(parsed.port or 5432)
+            database = (parsed.path or '/postgres').lstrip('/')
+            
+            ssl_context = None
+            if not is_local:
+                ssl_context = ssl.create_default_context()
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+
+            raw = pg8000.connect(
+                user=user,
+                password=password,
+                host=host,
+                port=port,
+                database=database,
+                ssl_context=ssl_context
+            )
+            return PostgresConnWrapper(raw, driver='pg8000')
+
+        raise RuntimeError("PostgreSQL URL provided but neither psycopg2 nor pg8000 driver is available.")
+
+    # SQLite local fallback
     conn = sqlite3.connect(DATABASE_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 def init_db():
-    """Initializes DB schema with all required tables."""
+    """Initializes DB schema with all required tables (PostgreSQL & SQLite compatible)."""
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    cursor.execute('''
+    id_type = "SERIAL PRIMARY KEY" if IS_POSTGRES else "INTEGER PRIMARY KEY AUTOINCREMENT"
+
+    cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
+            id {id_type},
+            username VARCHAR(255) UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
-            email TEXT NOT NULL,
-            role TEXT NOT NULL DEFAULT 'creator',
-            status TEXT NOT NULL DEFAULT 'approved',
+            email VARCHAR(255) NOT NULL,
+            role VARCHAR(50) NOT NULL DEFAULT 'creator',
+            status VARCHAR(50) NOT NULL DEFAULT 'approved',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
 
-    cursor.execute('''
+    cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS creator_requests (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            full_name TEXT NOT NULL,
-            email TEXT NOT NULL,
-            phone TEXT,
+            id {id_type},
+            full_name VARCHAR(255) NOT NULL,
+            email VARCHAR(255) NOT NULL,
+            phone VARCHAR(50),
             reason TEXT NOT NULL,
             portfolio_url TEXT,
-            status TEXT DEFAULT 'pending',
+            status VARCHAR(50) DEFAULT 'pending',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
 
-    cursor.execute('''
+    cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS creators (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            role_title TEXT DEFAULT 'क्रिएटर (Creator)',
+            id {id_type},
+            name VARCHAR(255) NOT NULL,
+            role_title VARCHAR(255) DEFAULT 'क्रिएटर (Creator)',
             bio TEXT,
             image_url TEXT,
             instagram_url TEXT,
@@ -421,32 +704,34 @@ def init_db():
         )
     ''')
 
-    cursor.execute('''
+    cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS content (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_type},
             title_mr TEXT NOT NULL,
             title_en TEXT NOT NULL,
-            category TEXT NOT NULL,
+            category VARCHAR(50) NOT NULL,
             description_mr TEXT,
             description_en TEXT,
             media_url TEXT,
-            media_type TEXT DEFAULT 'image',
+            media_type VARCHAR(50) DEFAULT 'image',
             google_drive_url TEXT,
-            author_name TEXT NOT NULL,
-            author_role TEXT NOT NULL DEFAULT 'Creator',
+            author_name VARCHAR(255) NOT NULL,
+            author_role VARCHAR(50) NOT NULL DEFAULT 'Creator',
             youtube_url TEXT,
             likes INTEGER DEFAULT 0,
             dislikes INTEGER DEFAULT 0,
             downloads INTEGER DEFAULT 0,
             shares INTEGER DEFAULT 0,
-            status TEXT DEFAULT 'draft',
+            status VARCHAR(50) DEFAULT 'draft',
+            approval_token VARCHAR(255),
+            creator_email VARCHAR(255),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
 
     # Add new columns to existing content table if missing (migration)
     new_columns = [
-        ('media_type', 'TEXT DEFAULT "image"'),
+        ('media_type', "TEXT DEFAULT 'image'"),
         ('google_drive_url', 'TEXT'),
         ('youtube_url', 'TEXT'),
         ('likes', 'INTEGER DEFAULT 0'),
@@ -458,36 +743,37 @@ def init_db():
     ]
     for col_name, col_def in new_columns:
         try:
-            cursor.execute(f'ALTER TABLE content ADD COLUMN {col_name} {col_def}')
-        except sqlite3.OperationalError:
+            if IS_POSTGRES:
+                cursor.execute(f'ALTER TABLE content ADD COLUMN IF NOT EXISTS {col_name} {col_def}')
+            else:
+                cursor.execute(f'ALTER TABLE content ADD COLUMN {col_name} {col_def}')
+        except Exception:
             pass  # Column already exists
 
-    cursor.execute('''
+    cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS content_reactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_type},
             content_id INTEGER NOT NULL,
-            user_ip TEXT NOT NULL,
-            reaction TEXT NOT NULL,
+            user_ip VARCHAR(100) NOT NULL,
+            reaction VARCHAR(50) NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(content_id, user_ip)
         )
     ''')
 
-    cursor.execute('''
+    cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS backup_storage (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id {id_type},
             content_id INTEGER,
-            original_filename TEXT NOT NULL,
+            original_filename VARCHAR(255) NOT NULL,
             local_path TEXT,
             google_drive_url TEXT,
-            file_size INTEGER,
-            file_type TEXT,
-            backup_status TEXT DEFAULT 'local',
+            file_size BIGINT,
+            file_type VARCHAR(50),
+            backup_status VARCHAR(50) DEFAULT 'local',
             uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-
-
 
     # Ensure ADMIN user exists
     cursor.execute('SELECT * FROM users WHERE username = ?', (ADMIN_ID,))
@@ -502,16 +788,39 @@ def init_db():
 
     # Seed initial content if empty
     cursor.execute('SELECT COUNT(*) as count FROM content')
-    if cursor.fetchone()['count'] == 0:
+    count_row = cursor.fetchone()
+    c_count = count_row['count'] if count_row else 0
+    if c_count == 0:
         seed_initial_content(cursor)
 
     # Seed initial creators if empty
     cursor.execute('SELECT COUNT(*) as count FROM creators')
-    if cursor.fetchone()['count'] == 0:
+    cr_row = cursor.fetchone()
+    cr_count = cr_row['count'] if cr_row else 0
+    if cr_count == 0:
         seed_initial_creators(cursor)
 
     conn.commit()
     conn.close()
+
+# Auto-initialize DB on startup and first request
+_db_initialized = False
+
+def ensure_db_initialized():
+    global _db_initialized
+    if not _db_initialized:
+        try:
+            init_db()
+            _db_initialized = True
+        except Exception as e:
+            print(f"[DB INIT ERROR] Could not initialize database schema: {e}")
+
+@app.before_request
+def auto_init_database():
+    ensure_db_initialized()
+
+# Attempt eager initialization
+ensure_db_initialized()
 
 def seed_initial_creators(cursor):
     """Populates initial Wavelvadi creators with festival images and Instagram links."""
@@ -777,15 +1086,29 @@ def request_creator_access():
     if not full_name or not email or not reason:
         return jsonify({'success': False, 'message': 'Name, email, and reason are required.'}), 400
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO creator_requests (full_name, email, phone, reason, portfolio_url, status)
-        VALUES (?, ?, ?, ?, ?, 'pending')
-    ''', (full_name, email, phone, reason, portfolio_url))
-    request_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO creator_requests (full_name, email, phone, reason, portfolio_url, status)
+            VALUES (?, ?, ?, ?, ?, 'pending')
+        ''', (full_name, email, phone, reason, portfolio_url))
+        request_id = cursor.lastrowid
+        conn.commit()
+    except Exception as e:
+        if conn:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        return jsonify({'success': False, 'message': f'अर्ज नोंदवताना त्रुटी: {str(e)}'}), 500
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     # Alert ADMIN via Email
     send_email_dispatch(
@@ -805,9 +1128,11 @@ def request_creator_access():
 @admin_required
 def get_creator_requests():
     conn = get_db_connection()
-    requests_list = conn.execute('SELECT * FROM creator_requests ORDER BY created_at DESC').fetchall()
-    conn.close()
-    return jsonify({'success': True, 'requests': [dict(row) for row in requests_list]})
+    try:
+        requests_list = conn.execute('SELECT * FROM creator_requests ORDER BY created_at DESC').fetchall()
+        return jsonify({'success': True, 'requests': [dict(row) for row in requests_list]})
+    finally:
+        conn.close()
 
 
 @app.route('/api/admin/creator-requests/<int:req_id>/action', methods=['POST'])
@@ -827,36 +1152,38 @@ def handle_creator_request(req_id):
         return jsonify({'success': False, 'message': 'Invalid action. Must be approve or reject.'}), 400
 
     conn = get_db_connection()
-    req_item = conn.execute('SELECT * FROM creator_requests WHERE id = ?', (req_id,)).fetchone()
+    try:
+        req_item = conn.execute('SELECT * FROM creator_requests WHERE id = ?', (req_id,)).fetchone()
+        if not req_item:
+            return jsonify({'success': False, 'message': 'Request not found.'}), 404
 
-    if not req_item:
-        conn.close()
-        return jsonify({'success': False, 'message': 'Request not found.'}), 404
+        if action == 'approve':
+            if custom_username:
+                creator_username = custom_username
+            else:
+                clean_name = ''.join(e for e in req_item['full_name'] if e.isalnum()).lower()
+                creator_username = f"creator_{clean_name}_{req_id}"
 
-    if action == 'approve':
-        # Use custom username or generate one
-        if custom_username:
-            creator_username = custom_username
-        else:
-            clean_name = ''.join(e for e in req_item['full_name'] if e.isalnum()).lower()
-            creator_username = f"creator_{clean_name}_{req_id}"
+            if custom_password:
+                final_password = custom_password
+            else:
+                final_password = f"Wavelvadi#{uuid.uuid4().hex[:8]}"
 
-        # Use custom password or generate one
-        if custom_password:
-            final_password = custom_password
-        else:
-            final_password = f"Wavelvadi#{uuid.uuid4().hex[:8]}"
+            hashed_pw = generate_password_hash(final_password)
 
-        hashed_pw = generate_password_hash(final_password)
-
-        try:
-            conn.execute(
-                'INSERT INTO users (username, password_hash, email, role, status) VALUES (?, ?, ?, ?, ?)',
-                (creator_username, hashed_pw, req_item['email'], 'creator', 'approved')
-            )
-            conn.execute('UPDATE creator_requests SET status = "approved" WHERE id = ?', (req_id,))
-            conn.commit()
-            conn.close()
+            try:
+                conn.execute(
+                    'INSERT INTO users (username, password_hash, email, role, status) VALUES (?, ?, ?, ?, ?)',
+                    (creator_username, hashed_pw, req_item['email'], 'creator', 'approved')
+                )
+                conn.execute("UPDATE creator_requests SET status = 'approved' WHERE id = ?", (req_id,))
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                err_str = str(e).lower()
+                if 'unique' in err_str or 'already exists' in err_str:
+                    return jsonify({'success': False, 'message': 'Username already exists. Please choose a different username.'}), 400
+                return jsonify({'success': False, 'message': f'Database error: {str(e)}'}), 500
 
             # DISPATCH EMAIL WITH USER ID AND PASSKEY
             email_sent, email_msg = send_creator_credentials_email(
@@ -885,14 +1212,12 @@ def handle_creator_request(req_id):
                 'email_info': email_msg,
                 'sms_dispatched': sms_sent
             })
-        except sqlite3.IntegrityError:
-            conn.close()
-            return jsonify({'success': False, 'message': 'Username already exists. Please choose a different username.'}), 400
-    else:
-        conn.execute('UPDATE creator_requests SET status = "rejected" WHERE id = ?', (req_id,))
-        conn.commit()
+        else:
+            conn.execute("UPDATE creator_requests SET status = 'rejected' WHERE id = ?", (req_id,))
+            conn.commit()
+            return jsonify({'success': True, 'message': 'Creator request rejected.'})
+    finally:
         conn.close()
-        return jsonify({'success': True, 'message': 'Creator request rejected.'})
 
 
 @app.route('/api/admin/creator-requests/<int:req_id>/delete', methods=['POST'])
@@ -900,14 +1225,18 @@ def handle_creator_request(req_id):
 def delete_creator_request(req_id):
     """ADMIN can delete a creator request from the database."""
     conn = get_db_connection()
-    req_item = conn.execute('SELECT * FROM creator_requests WHERE id = ?', (req_id,)).fetchone()
-    if not req_item:
+    try:
+        req_item = conn.execute('SELECT * FROM creator_requests WHERE id = ?', (req_id,)).fetchone()
+        if not req_item:
+            return jsonify({'success': False, 'message': 'Request not found.'}), 404
+        conn.execute('DELETE FROM creator_requests WHERE id = ?', (req_id,))
+        conn.commit()
+        return jsonify({'success': True, 'message': 'Creator request deleted successfully.'})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'success': False, 'message': f'हटवताना त्रुटी: {str(e)}'}), 500
+    finally:
         conn.close()
-        return jsonify({'success': False, 'message': 'Request not found.'}), 404
-    conn.execute('DELETE FROM creator_requests WHERE id = ?', (req_id,))
-    conn.commit()
-    conn.close()
-    return jsonify({'success': True, 'message': 'Creator request deleted successfully.'})
 
 
 @app.route('/api/creators', methods=['GET'])
@@ -997,23 +1326,28 @@ def save_creator_profile():
                 image_url = opt_b64
 
     conn = get_db_connection()
-    if creator_id and str(creator_id).isdigit():
-        conn.execute('''
-            UPDATE creators
-            SET name = ?, role_title = ?, bio = ?, image_url = ?, instagram_url = ?
-            WHERE id = ?
-        ''', (name, role_title, bio, image_url, instagram_url, int(creator_id)))
-        msg = f'क्रिएटर "{name}" माहिती यशस्वीरित्या अपडेट केली.'
-    else:
-        conn.execute('''
-            INSERT INTO creators (name, role_title, bio, image_url, instagram_url)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (name, role_title, bio, image_url, instagram_url))
-        msg = f'नवीन क्रिएटर "{name}" यशस्वीरित्या जोडला गेला.'
+    try:
+        if creator_id and str(creator_id).isdigit():
+            conn.execute('''
+                UPDATE creators
+                SET name = ?, role_title = ?, bio = ?, image_url = ?, instagram_url = ?
+                WHERE id = ?
+            ''', (name, role_title, bio, image_url, instagram_url, int(creator_id)))
+            msg = f'क्रिएटर "{name}" माहिती यशस्वीरित्या अपडेट केली.'
+        else:
+            conn.execute('''
+                INSERT INTO creators (name, role_title, bio, image_url, instagram_url)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (name, role_title, bio, image_url, instagram_url))
+            msg = f'नवीन क्रिएटर "{name}" यशस्वीरित्या जोडला गेला.'
 
-    conn.commit()
-    conn.close()
-    return jsonify({'success': True, 'message': msg, 'image_url': image_url})
+        conn.commit()
+        return jsonify({'success': True, 'message': msg, 'image_url': image_url})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'success': False, 'message': f'क्रिएटर माहिती जतन करताना त्रुटी: {str(e)}'}), 500
+    finally:
+        conn.close()
 
 
 @app.route('/api/admin/creator-profile/<int:creator_id>/delete', methods=['POST'])
@@ -1021,15 +1355,19 @@ def save_creator_profile():
 def delete_creator_profile(creator_id):
     """ADMIN can delete a creator profile."""
     conn = get_db_connection()
-    creator = conn.execute('SELECT * FROM creators WHERE id = ?', (creator_id,)).fetchone()
-    if not creator:
-        conn.close()
-        return jsonify({'success': False, 'message': 'क्रिएटर सापडला नाही.'}), 404
+    try:
+        creator = conn.execute('SELECT * FROM creators WHERE id = ?', (creator_id,)).fetchone()
+        if not creator:
+            return jsonify({'success': False, 'message': 'क्रिएटर सापडला नाही.'}), 404
 
-    conn.execute('DELETE FROM creators WHERE id = ?', (creator_id,))
-    conn.commit()
-    conn.close()
-    return jsonify({'success': True, 'message': f'क्रिएटर "{creator["name"]}" यशस्वीरित्या हटवला.'})
+        conn.execute('DELETE FROM creators WHERE id = ?', (creator_id,))
+        conn.commit()
+        return jsonify({'success': True, 'message': f'क्रिएटर "{creator["name"]}" यशस्वीरित्या हटवला.'})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'success': False, 'message': f'हटवताना त्रुटी: {str(e)}'}), 500
+    finally:
+        conn.close()
 
 
 @app.route('/api/admin/creators', methods=['GET'])
@@ -1037,11 +1375,13 @@ def delete_creator_profile(creator_id):
 def get_creators():
     """Get all approved creators for management."""
     conn = get_db_connection()
-    creators = conn.execute(
-        "SELECT id, username, email, role, status, created_at FROM users WHERE role != 'ADMIN' ORDER BY created_at DESC"
-    ).fetchall()
-    conn.close()
-    return jsonify({'success': True, 'creators': [dict(row) for row in creators]})
+    try:
+        creators = conn.execute(
+            "SELECT id, username, email, role, status, created_at FROM users WHERE role != 'ADMIN' ORDER BY created_at DESC"
+        ).fetchall()
+        return jsonify({'success': True, 'creators': [dict(row) for row in creators]})
+    finally:
+        conn.close()
 
 
 @app.route('/api/admin/creators/<int:creator_id>/delete', methods=['POST'])
@@ -1049,14 +1389,18 @@ def get_creators():
 def delete_creator(creator_id):
     """ADMIN can delete/remove a creator account."""
     conn = get_db_connection()
-    creator = conn.execute('SELECT * FROM users WHERE id = ?', (creator_id,)).fetchone()
-    if not creator:
+    try:
+        creator = conn.execute('SELECT * FROM users WHERE id = ?', (creator_id,)).fetchone()
+        if not creator:
+            return jsonify({'success': False, 'message': 'Creator not found.'}), 404
+        conn.execute('DELETE FROM users WHERE id = ?', (creator_id,))
+        conn.commit()
+        return jsonify({'success': True, 'message': f'Creator "{creator["username"]}" deleted successfully.'})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'success': False, 'message': f'खाते हटवताना त्रुटी: {str(e)}'}), 500
+    finally:
         conn.close()
-        return jsonify({'success': False, 'message': 'Creator not found.'}), 404
-    conn.execute('DELETE FROM users WHERE id = ?', (creator_id,))
-    conn.commit()
-    conn.close()
-    return jsonify({'success': True, 'message': f'Creator "{creator["username"]}" deleted successfully.'})
 
 
 # ==========================================
@@ -1066,14 +1410,16 @@ def delete_creator(creator_id):
 def get_public_content():
     category = request.args.get('category')
     conn = get_db_connection()
-    if category and category != 'all':
-        query = 'SELECT * FROM content WHERE status = "published" AND category = ? ORDER BY created_at DESC'
-        items = conn.execute(query, (category,)).fetchall()
-    else:
-        query = 'SELECT * FROM content WHERE status = "published" ORDER BY created_at DESC'
-        items = conn.execute(query).fetchall()
-    conn.close()
-    return jsonify({'success': True, 'content': [dict(row) for row in items]})
+    try:
+        if category and category != 'all':
+            query = "SELECT * FROM content WHERE status = 'published' AND category = ? ORDER BY created_at DESC"
+            items = conn.execute(query, (category,)).fetchall()
+        else:
+            query = "SELECT * FROM content WHERE status = 'published' ORDER BY created_at DESC"
+            items = conn.execute(query).fetchall()
+        return jsonify({'success': True, 'content': [dict(row) for row in items]})
+    finally:
+        conn.close()
 
 
 @app.route('/api/admin/content', methods=['GET'])
@@ -1224,28 +1570,33 @@ def submit_content():
         status = 'pending'
 
     conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO content (title_mr, title_en, category, description_mr, description_en,
-                             media_url, media_type, google_drive_url, youtube_url,
-                             author_name, author_role, status, approval_token, creator_email)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (title_mr, title_en, category, description_mr, description_en,
-          media_url, media_type, google_drive_url, youtube_url,
-          author_name, user_role, status, approval_token, creator_email))
-    content_id = cursor.lastrowid
-
-    # Add to backup_storage table
-    if backup_filename:
-        backup_status = 'synced' if google_drive_url else 'local'
-        storage_path = saved_filepath or '[Google Drive Cloud - Not Stored Locally]'
+    try:
+        cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO backup_storage (content_id, original_filename, local_path, google_drive_url, file_size, file_type, backup_status)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (content_id, backup_filename, storage_path, google_drive_url or '', backup_size, media_type, backup_status))
+            INSERT INTO content (title_mr, title_en, category, description_mr, description_en,
+                                 media_url, media_type, google_drive_url, youtube_url,
+                                 author_name, author_role, status, approval_token, creator_email)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (title_mr, title_en, category, description_mr, description_en,
+              media_url, media_type, google_drive_url, youtube_url,
+              author_name, user_role, status, approval_token, creator_email))
+        content_id = cursor.lastrowid
 
-    conn.commit()
-    conn.close()
+        # Add to backup_storage table
+        if backup_filename:
+            backup_status = 'synced' if google_drive_url else 'local'
+            storage_path = saved_filepath or '[Google Drive Cloud - Not Stored Locally]'
+            cursor.execute('''
+                INSERT INTO backup_storage (content_id, original_filename, local_path, google_drive_url, file_size, file_type, backup_status)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (content_id, backup_filename, storage_path, google_drive_url or '', backup_size, media_type, backup_status))
+
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'success': False, 'message': f'मजकूर जतन करताना त्रुटी आली: {str(e)}'}), 500
+    finally:
+        conn.close()
 
     if not is_admin:
         # Send Email to ADMIN with 1-click Approve and Reject links
@@ -1280,10 +1631,10 @@ def content_email_action():
     Handles 1-Click Approve / Reject action directly from ADMIN's email inbox.
     """
     action = request.args.get('action')
-    content_id = request.args.get('id')
+    raw_content_id = request.args.get('id')
     token = request.args.get('token')
 
-    if not action or not content_id or not token:
+    if not action or not raw_content_id or not token:
         return render_template_string("""
             <div style="font-family:sans-serif; text-align:center; padding:40px; color:#DC2626;">
                 <h2>अवैध विनंती (Invalid Request)</h2>
@@ -1291,144 +1642,178 @@ def content_email_action():
             </div>
         """), 400
 
-    conn = get_db_connection()
-    item = conn.execute('SELECT * FROM content WHERE id = ?', (content_id,)).fetchone()
-
-    if not item or item['approval_token'] != token:
-        conn.close()
+    try:
+        content_id = int(raw_content_id)
+    except (ValueError, TypeError):
         return render_template_string("""
             <div style="font-family:sans-serif; text-align:center; padding:40px; color:#DC2626;">
-                <h2>अवैध किंवा कालबाह्य टोकन (Invalid or Expired Token)</h2>
-                <p>हा मंजुरी दुवा अवैध किंवा कालबाह्य झाला आहे.</p>
+                <h2>अवैध आयडी (Invalid ID)</h2>
+                <p>कंटेंट आयडी अमान्य आहे.</p>
             </div>
-        """), 403
+        """), 400
 
-    if action == 'approve':
-        conn.execute('UPDATE content SET status = "published" WHERE id = ?', (content_id,))
-        conn.commit()
-        author_email = item['creator_email']
-        author_name = item['author_name']
-        title_mr = item['title_mr']
+    conn = get_db_connection()
+    try:
+        item = conn.execute('SELECT * FROM content WHERE id = ?', (content_id,)).fetchone()
+
+        if not item or item['approval_token'] != token:
+            return render_template_string("""
+                <div style="font-family:sans-serif; text-align:center; padding:40px; color:#DC2626;">
+                    <h2>अवैध किंवा कालबाह्य टोकन (Invalid or Expired Token)</h2>
+                    <p>हा मंजुरी दुवा अवैध किंवा कालबाह्य झाला आहे.</p>
+                </div>
+            """), 403
+
+        if action == 'approve':
+            conn.execute("UPDATE content SET status = 'published' WHERE id = ?", (content_id,))
+            conn.commit()
+            author_email = item['creator_email']
+            author_name = item['author_name']
+            title_mr = item['title_mr']
+
+            # Notify creator
+            if author_email:
+                send_content_status_email_to_creator(author_email, author_name, title_mr, is_approved=True)
+
+            return render_template_string("""
+                <!DOCTYPE html>
+                <html lang="mr">
+                <head>
+                  <meta charset="utf-8">
+                  <title>मजकूर मंजूर - वावेलवाडी ग्राम पोर्टल</title>
+                  <meta name="viewport" content="width=device-width, initial-scale=1">
+                  <style>
+                    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #FFFBEB; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; }
+                    .card { background: white; border: 2px solid #059669; border-radius: 16px; padding: 36px; max-width: 520px; text-align: center; box-shadow: 0 10px 25px rgba(0,0,0,0.1); }
+                    .badge { background: #D1FAE5; color: #065F46; padding: 6px 14px; border-radius: 20px; font-weight: bold; font-size: 14px; display: inline-block; margin-bottom: 16px; }
+                    h1 { color: #065F46; font-size: 24px; margin-bottom: 12px; }
+                    p { color: #4B5563; font-size: 15px; line-height: 1.6; }
+                    .btn { display: inline-block; margin-top: 20px; background: #059669; color: white; padding: 12px 28px; text-decoration: none; border-radius: 8px; font-weight: bold; }
+                  </style>
+                </head>
+                <body>
+                  <div class="card">
+                    <span class="badge">✅ ई-मेल द्वारे यशस्वी मंजुरी (Approved from Email)</span>
+                    <h1>मजकूर प्रकाशित करण्यात आला आहे!</h1>
+                    <p><strong>शीर्षक:</strong> {{ title }}</p>
+                    <p>क्रिएटर <strong>{{ author }}</strong> यांचा हा मजकूर वावेलवाडी वेब पोर्टलवर आता सर्वांसाठी सार्वजनिक (Live) झाला आहे.</p>
+                    <a href="/" class="btn">पोर्टलवर जाऊन पहा</a>
+                  </div>
+                </body>
+                </html>
+            """, title=title_mr, author=author_name)
+
+        elif action == 'reject':
+            conn.execute("UPDATE content SET status = 'rejected' WHERE id = ?", (content_id,))
+            conn.commit()
+            author_email = item['creator_email']
+            author_name = item['author_name']
+            title_mr = item['title_mr']
+
+            if author_email:
+                send_content_status_email_to_creator(author_email, author_name, title_mr, is_approved=False)
+
+            return render_template_string("""
+                <!DOCTYPE html>
+                <html lang="mr">
+                <head>
+                  <meta charset="utf-8">
+                  <title>मजकूर नाकारला - वावेलवाडी ग्राम पोर्टल</title>
+                  <meta name="viewport" content="width=device-width, initial-scale=1">
+                  <style>
+                    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #FEF2F2; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; }
+                    .card { background: white; border: 2px solid #DC2626; border-radius: 16px; padding: 36px; max-width: 520px; text-align: center; box-shadow: 0 10px 25px rgba(0,0,0,0.1); }
+                    .badge { background: #FEE2E2; color: #991B1B; padding: 6px 14px; border-radius: 20px; font-weight: bold; font-size: 14px; display: inline-block; margin-bottom: 16px; }
+                    h1 { color: #991B1B; font-size: 24px; margin-bottom: 12px; }
+                    p { color: #4B5563; font-size: 15px; line-height: 1.6; }
+                    .btn { display: inline-block; margin-top: 20px; background: #DC2626; color: white; padding: 12px 28px; text-decoration: none; border-radius: 8px; font-weight: bold; }
+                  </style>
+                </head>
+                <body>
+                  <div class="card">
+                    <span class="badge">❌ ई-मेल द्वारे मजकूर नाकारला (Rejected from Email)</span>
+                    <h1>मजकूर नाकारण्यात आला आहे</h1>
+                    <p><strong>शीर्षक:</strong> {{ title }}</p>
+                    <p>हा मजकूर पोर्टलवर प्रसिद्ध केला जाणार नाही.</p>
+                    <a href="/" class="btn">पोर्टलवर परत जा</a>
+                  </div>
+                </body>
+                </html>
+            """, title=title_mr)
+    finally:
         conn.close()
-
-        # Notify creator
-        if author_email:
-            send_content_status_email_to_creator(author_email, author_name, title_mr, is_approved=True)
-
-        return render_template_string("""
-            <!DOCTYPE html>
-            <html lang="mr">
-            <head>
-              <meta charset="utf-8">
-              <title>मजकूर मंजूर - वावेलवाडी ग्राम पोर्टल</title>
-              <meta name="viewport" content="width=device-width, initial-scale=1">
-              <style>
-                body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #FFFBEB; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; }
-                .card { background: white; border: 2px solid #059669; border-radius: 16px; padding: 36px; max-width: 520px; text-align: center; box-shadow: 0 10px 25px rgba(0,0,0,0.1); }
-                .badge { background: #D1FAE5; color: #065F46; padding: 6px 14px; border-radius: 20px; font-weight: bold; font-size: 14px; display: inline-block; margin-bottom: 16px; }
-                h1 { color: #065F46; font-size: 24px; margin-bottom: 12px; }
-                p { color: #4B5563; font-size: 15px; line-height: 1.6; }
-                .btn { display: inline-block; margin-top: 20px; background: #059669; color: white; padding: 12px 28px; text-decoration: none; border-radius: 8px; font-weight: bold; }
-              </style>
-            </head>
-            <body>
-              <div class="card">
-                <span class="badge">✅ ई-मेल द्वारे यशस्वी मंजुरी (Approved from Email)</span>
-                <h1>मजकूर प्रकाशित करण्यात आला आहे!</h1>
-                <p><strong>शीर्षक:</strong> {{ title }}</p>
-                <p>क्रिएटर <strong>{{ author }}</strong> यांचा हा मजकूर वावेलवाडी वेब पोर्टलवर आता सर्वांसाठी सार्वजनिक (Live) झाला आहे.</p>
-                <a href="/" class="btn">पोर्टलवर जाऊन पहा</a>
-              </div>
-            </body>
-            </html>
-        """, title=title_mr, author=author_name)
-
-    elif action == 'reject':
-        conn.execute('UPDATE content SET status = "rejected" WHERE id = ?', (content_id,))
-        conn.commit()
-        author_email = item['creator_email']
-        author_name = item['author_name']
-        title_mr = item['title_mr']
-        conn.close()
-
-        if author_email:
-            send_content_status_email_to_creator(author_email, author_name, title_mr, is_approved=False)
-
-        return render_template_string("""
-            <!DOCTYPE html>
-            <html lang="mr">
-            <head>
-              <meta charset="utf-8">
-              <title>मजकूर नाकारला - वावेलवाडी ग्राम पोर्टल</title>
-              <meta name="viewport" content="width=device-width, initial-scale=1">
-              <style>
-                body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #FEF2F2; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; }
-                .card { background: white; border: 2px solid #DC2626; border-radius: 16px; padding: 36px; max-width: 520px; text-align: center; box-shadow: 0 10px 25px rgba(0,0,0,0.1); }
-                .badge { background: #FEE2E2; color: #991B1B; padding: 6px 14px; border-radius: 20px; font-weight: bold; font-size: 14px; display: inline-block; margin-bottom: 16px; }
-                h1 { color: #991B1B; font-size: 24px; margin-bottom: 12px; }
-                p { color: #4B5563; font-size: 15px; line-height: 1.6; }
-                .btn { display: inline-block; margin-top: 20px; background: #DC2626; color: white; padding: 12px 28px; text-decoration: none; border-radius: 8px; font-weight: bold; }
-              </style>
-            </head>
-            <body>
-              <div class="card">
-                <span class="badge">❌ ई-मेल द्वारे मजकूर नाकारला (Rejected from Email)</span>
-                <h1>मजकूर नाकारण्यात आला आहे</h1>
-                <p><strong>शीर्षक:</strong> {{ title }}</p>
-                <p>हा मजकूर पोर्टलवर प्रसिद्ध केला जाणार नाही.</p>
-                <a href="/" class="btn">पोर्टलवर परत जा</a>
-              </div>
-            </body>
-            </html>
-        """, title=title_mr)
 
 
 @app.route('/api/admin/content/<int:content_id>/publish', methods=['POST'])
 @admin_required
 def publish_content(content_id):
     conn = get_db_connection()
-    conn.execute('UPDATE content SET status = "published" WHERE id = ?', (content_id,))
-    conn.commit()
-    conn.close()
-    return jsonify({'success': True, 'message': 'कंटेंट यशस्वीरीत्या सार्वजनिक (Published) करण्यात आले आहे!'})
+    try:
+        conn.execute("UPDATE content SET status = 'published' WHERE id = ?", (content_id,))
+        conn.commit()
+        return jsonify({'success': True, 'message': 'कंटेंट यशस्वीरीत्या सार्वजनिक (Published) करण्यात आले आहे!'})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'success': False, 'message': f'त्रुटी: {str(e)}'}), 500
+    finally:
+        conn.close()
 
 
 @app.route('/api/admin/content/<int:content_id>/reject', methods=['POST'])
 @admin_required
 def reject_content(content_id):
     conn = get_db_connection()
-    conn.execute('UPDATE content SET status = "rejected" WHERE id = ?', (content_id,))
-    conn.commit()
-    conn.close()
-    return jsonify({'success': True, 'message': 'कंटेंट नाकारण्यात आले आहे (Rejected).'})
+    try:
+        conn.execute("UPDATE content SET status = 'rejected' WHERE id = ?", (content_id,))
+        conn.commit()
+        return jsonify({'success': True, 'message': 'कंटेंट नाकारण्यात आले आहे (Rejected).'})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'success': False, 'message': f'त्रुटी: {str(e)}'}), 500
+    finally:
+        conn.close()
 
 
 @app.route('/api/admin/content/<int:content_id>/delete', methods=['POST'])
 @admin_required
 def delete_content(content_id):
     conn = get_db_connection()
-    item = conn.execute('SELECT * FROM content WHERE id = ?', (content_id,)).fetchone()
-    if not item:
+    try:
+        item = conn.execute('SELECT * FROM content WHERE id = ?', (content_id,)).fetchone()
+        if not item:
+            return jsonify({'success': False, 'message': 'Content not found.'}), 404
+
+        # Remove local file if it exists
+        if item['media_url'] and item['media_url'].startswith('/uploads/'):
+            filepath = os.path.join(app.root_path, item['media_url'].lstrip('/'))
+            if os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                except Exception:
+                    pass
+
+        # Clean up related reactions and disassociate backup records before deleting content
+        try:
+            conn.execute('DELETE FROM content_reactions WHERE content_id = ?', (content_id,))
+        except Exception:
+            pass
+
+        try:
+            conn.execute('UPDATE backup_storage SET content_id = NULL WHERE content_id = ?', (content_id,))
+        except Exception:
+            pass
+
+        conn.execute('DELETE FROM content WHERE id = ?', (content_id,))
+        conn.commit()
+        return jsonify({'success': True, 'message': 'कंटेंट हटवले गेले आहे (Deleted).'})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'success': False, 'message': f'कंटेंट हटवताना त्रुटी: {str(e)}'}), 500
+    finally:
         conn.close()
-        return jsonify({'success': False, 'message': 'Content not found.'}), 404
-
-    # Remove local file if it exists
-    if item['media_url'] and item['media_url'].startswith('/uploads/'):
-        filepath = os.path.join(app.root_path, item['media_url'].lstrip('/'))
-        if os.path.exists(filepath):
-            try:
-                os.remove(filepath)
-            except Exception:
-                pass
-
-    conn.execute('DELETE FROM content WHERE id = ?', (content_id,))
-    conn.commit()
-    conn.close()
-    return jsonify({'success': True, 'message': 'कंटेंट हटवले गेले आहे (Deleted).'})
 
 
 # ==========================================
-# BACKUP STORAGE DATABASE API
 # BACKUP STORAGE DATABASE API
 # ==========================================
 @app.route('/api/admin/backup-storage', methods=['GET'])
@@ -1436,14 +1821,16 @@ def delete_content(content_id):
 def get_backup_storage():
     """Returns all backup storage entries for ADMIN management."""
     conn = get_db_connection()
-    items = conn.execute('''
-        SELECT bs.*, c.title_mr, c.title_en, c.category, c.status as content_status
-        FROM backup_storage bs
-        LEFT JOIN content c ON bs.content_id = c.id
-        ORDER BY bs.uploaded_at DESC
-    ''').fetchall()
-    conn.close()
-    return jsonify({'success': True, 'backups': [dict(row) for row in items]})
+    try:
+        items = conn.execute('''
+            SELECT bs.*, c.title_mr, c.title_en, c.category, c.status as content_status
+            FROM backup_storage bs
+            LEFT JOIN content c ON bs.content_id = c.id
+            ORDER BY bs.uploaded_at DESC
+        ''').fetchall()
+        return jsonify({'success': True, 'backups': [dict(row) for row in items]})
+    finally:
+        conn.close()
 
 
 @app.route('/api/admin/backup-storage/<int:backup_id>/delete', methods=['POST'])
@@ -1451,24 +1838,28 @@ def get_backup_storage():
 def delete_backup(backup_id):
     """Delete a backup record (and optionally its local file)."""
     conn = get_db_connection()
-    backup = conn.execute('SELECT * FROM backup_storage WHERE id = ?', (backup_id,)).fetchone()
-    if not backup:
+    try:
+        backup = conn.execute('SELECT * FROM backup_storage WHERE id = ?', (backup_id,)).fetchone()
+        if not backup:
+            return jsonify({'success': False, 'message': 'Backup not found.'}), 404
+
+        # Try to remove local file
+        if backup['local_path'] and backup['local_path'].startswith('/uploads/'):
+            filepath = os.path.join(app.root_path, backup['local_path'].lstrip('/'))
+            if os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                except Exception:
+                    pass
+
+        conn.execute('DELETE FROM backup_storage WHERE id = ?', (backup_id,))
+        conn.commit()
+        return jsonify({'success': True, 'message': 'Backup record deleted.'})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'success': False, 'message': f'बॅकअप हटवताना त्रुटी: {str(e)}'}), 500
+    finally:
         conn.close()
-        return jsonify({'success': False, 'message': 'Backup not found.'}), 404
-
-    # Try to remove local file
-    if backup['local_path'] and backup['local_path'].startswith('/uploads/'):
-        filepath = os.path.join(app.root_path, backup['local_path'].lstrip('/'))
-        if os.path.exists(filepath):
-            try:
-                os.remove(filepath)
-            except Exception:
-                pass
-
-    conn.execute('DELETE FROM backup_storage WHERE id = ?', (backup_id,))
-    conn.commit()
-    conn.close()
-    return jsonify({'success': True, 'message': 'Backup record deleted.'})
 
 
 @app.route('/api/admin/backup-storage/<int:backup_id>/update-drive-url', methods=['POST'])
@@ -1479,10 +1870,15 @@ def update_drive_url(backup_id):
     drive_url = data.get('google_drive_url', '').strip()
 
     conn = get_db_connection()
-    conn.execute('UPDATE backup_storage SET google_drive_url = ?, backup_status = "synced" WHERE id = ?', (drive_url, backup_id))
-    conn.commit()
-    conn.close()
-    return jsonify({'success': True, 'message': 'Google Drive URL updated.'})
+    try:
+        conn.execute("UPDATE backup_storage SET google_drive_url = ?, backup_status = 'synced' WHERE id = ?", (drive_url, backup_id))
+        conn.commit()
+        return jsonify({'success': True, 'message': 'Google Drive URL updated.'})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'success': False, 'message': f'त्रुटी: {str(e)}'}), 500
+    finally:
+        conn.close()
 
 
 @app.route('/uploads/<filename>')
@@ -1528,54 +1924,56 @@ def check_google_script_test():
 def sync_backup_to_drive(backup_id):
     """Syncs a local backup file to Google Drive via Google Apps Script and frees local disk space for creator content."""
     conn = get_db_connection()
-    backup = conn.execute('SELECT * FROM backup_storage WHERE id = ?', (backup_id,)).fetchone()
-    if not backup:
+    try:
+        backup = conn.execute('SELECT * FROM backup_storage WHERE id = ?', (backup_id,)).fetchone()
+        if not backup:
+            return jsonify({'success': False, 'message': 'Backup record not found.'}), 404
+
+        local_path = os.path.join(app.root_path, backup['local_path'].lstrip('/'))
+        if not os.path.exists(local_path):
+            return jsonify({'success': False, 'message': 'Local file does not exist on disk.'}), 404
+
+        ext = backup['original_filename'].rsplit('.', 1)[-1].lower() if '.' in backup['original_filename'] else 'bin'
+        mime = 'image/' + ext if ext in ['png', 'jpg', 'jpeg', 'gif'] else ('video/' + ext if ext in ['mp4', 'webm'] else 'application/octet-stream')
+
+        ok, drive_result = upload_to_google_drive(local_path, backup['original_filename'], mime)
+        if ok and isinstance(drive_result, dict):
+            drive_url = drive_result.get('viewUrl', '')
+            file_id = drive_result.get('fileId', '')
+            direct_url = drive_result.get('directUrl', '') or (f"https://lh3.googleusercontent.com/d/{file_id}" if file_id else drive_url)
+            preview_url = drive_result.get('previewUrl', '') or (f"https://drive.google.com/file/d/{file_id}/preview" if file_id else drive_url)
+            media_url = direct_url if ext in ['png', 'jpg', 'jpeg', 'gif'] else preview_url
+
+            # Check if content belonged to creator
+            is_creator_content = False
+            if backup['content_id']:
+                content_row = conn.execute('SELECT author_role FROM content WHERE id = ?', (backup['content_id'],)).fetchone()
+                if content_row and content_row['author_role'] == 'creator':
+                    is_creator_content = True
+
+            new_local_path = backup['local_path']
+            # If it was creator content, delete local file so it is stored strictly in Google Drive
+            if is_creator_content:
+                try:
+                    if os.path.exists(local_path):
+                        os.remove(local_path)
+                    new_local_path = '[Google Drive Cloud - Not Stored Locally]'
+                except Exception:
+                    pass
+
+            conn.execute("UPDATE backup_storage SET google_drive_url = ?, local_path = ?, backup_status = 'synced' WHERE id = ?", (drive_url, new_local_path, backup_id))
+            if backup['content_id']:
+                conn.execute('UPDATE content SET google_drive_url = ?, media_url = ? WHERE id = ?', (drive_url, media_url, backup['content_id']))
+            conn.commit()
+            return jsonify({'success': True, 'message': 'Google Drive वर यशस्वीरीत्या बॅकअप झाला आणि स्थानिक डिस्क रिकामी केली गेली!', 'drive_url': drive_url})
+        else:
+            err_msg = drive_result if isinstance(drive_result, str) else 'Google Drive upload failed.'
+            return jsonify({'success': False, 'message': f'Sync failed: {err_msg}'}), 400
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'success': False, 'message': f'Sync त्रुटी: {str(e)}'}), 500
+    finally:
         conn.close()
-        return jsonify({'success': False, 'message': 'Backup record not found.'}), 404
-
-    local_path = os.path.join(app.root_path, backup['local_path'].lstrip('/'))
-    if not os.path.exists(local_path):
-        conn.close()
-        return jsonify({'success': False, 'message': 'Local file does not exist on disk.'}), 404
-
-    ext = backup['original_filename'].rsplit('.', 1)[-1].lower() if '.' in backup['original_filename'] else 'bin'
-    mime = 'image/' + ext if ext in ['png', 'jpg', 'jpeg', 'gif'] else ('video/' + ext if ext in ['mp4', 'webm'] else 'application/octet-stream')
-
-    ok, drive_result = upload_to_google_drive(local_path, backup['original_filename'], mime)
-    if ok and isinstance(drive_result, dict):
-        drive_url = drive_result.get('viewUrl', '')
-        file_id = drive_result.get('fileId', '')
-        direct_url = drive_result.get('directUrl', '') or (f"https://lh3.googleusercontent.com/d/{file_id}" if file_id else drive_url)
-        preview_url = drive_result.get('previewUrl', '') or (f"https://drive.google.com/file/d/{file_id}/preview" if file_id else drive_url)
-        media_url = direct_url if ext in ['png', 'jpg', 'jpeg', 'gif'] else preview_url
-
-        # Check if content belonged to creator
-        is_creator_content = False
-        if backup['content_id']:
-            content_row = conn.execute('SELECT author_role FROM content WHERE id = ?', (backup['content_id'],)).fetchone()
-            if content_row and content_row['author_role'] == 'creator':
-                is_creator_content = True
-
-        new_local_path = backup['local_path']
-        # If it was creator content, delete local file so it is stored strictly in Google Drive
-        if is_creator_content:
-            try:
-                if os.path.exists(local_path):
-                    os.remove(local_path)
-                new_local_path = '[Google Drive Cloud - Not Stored Locally]'
-            except Exception:
-                pass
-
-        conn.execute('UPDATE backup_storage SET google_drive_url = ?, local_path = ?, backup_status = "synced" WHERE id = ?', (drive_url, new_local_path, backup_id))
-        if backup['content_id']:
-            conn.execute('UPDATE content SET google_drive_url = ?, media_url = ? WHERE id = ?', (drive_url, media_url, backup['content_id']))
-        conn.commit()
-        conn.close()
-        return jsonify({'success': True, 'message': 'Google Drive वर यशस्वीरीत्या बॅकअप झाला आणि स्थानिक डिस्क रिकामी केली गेली!', 'drive_url': drive_url})
-    else:
-        conn.close()
-        err_msg = drive_result if isinstance(drive_result, str) else 'Google Drive upload failed.'
-        return jsonify({'success': False, 'message': f'Sync failed: {err_msg}'}), 400
 
 
 @app.route('/api/drive-proxy/<file_id>')
