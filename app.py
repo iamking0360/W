@@ -2558,50 +2558,65 @@ def check_google_script_test():
 @app.route('/api/admin/backup-storage/<int:backup_id>/sync-drive', methods=['POST'])
 @admin_required
 def sync_backup_to_drive(backup_id):
-    """Syncs a local backup file to Google Drive via Google Apps Script and frees local disk space for creator content."""
+    """Syncs a backup file to Google Drive via Google Apps Script with media_storage fallback."""
     conn = get_db_connection()
     try:
         backup = conn.execute('SELECT * FROM backup_storage WHERE id = ?', (backup_id,)).fetchone()
         if not backup:
             return jsonify({'success': False, 'message': 'Backup record not found.'}), 404
 
-        local_path = os.path.join(app.root_path, backup['local_path'].lstrip('/'))
-        if not os.path.exists(local_path):
-            return jsonify({'success': False, 'message': 'Local file does not exist on disk.'}), 404
+        data_to_sync = None
+        filename_to_sync = backup['original_filename'] or 'backup_file'
+        ext = filename_to_sync.rsplit('.', 1)[-1].lower() if '.' in filename_to_sync else 'bin'
+        mime = 'image/' + ext if ext in ['png', 'jpg', 'jpeg', 'gif', 'webp'] else ('video/' + ext if ext in ['mp4', 'webm', 'mov'] else 'application/octet-stream')
 
-        ext = backup['original_filename'].rsplit('.', 1)[-1].lower() if '.' in backup['original_filename'] else 'bin'
-        mime = 'image/' + ext if ext in ['png', 'jpg', 'jpeg', 'gif'] else ('video/' + ext if ext in ['mp4', 'webm'] else 'application/octet-stream')
+        # 1. Check if local disk file exists
+        local_path = os.path.join(app.root_path, backup['local_path'].lstrip('/')) if backup['local_path'] and not backup['local_path'].startswith('[') else ''
+        if local_path and os.path.exists(local_path):
+            try:
+                with open(local_path, 'rb') as f:
+                    data_to_sync = f.read()
+            except Exception:
+                pass
 
-        ok, drive_result = upload_to_google_drive(local_path, backup['original_filename'], mime)
+        # 2. Check if file is stored in database media_storage
+        if not data_to_sync and backup['content_id']:
+            media_row = conn.execute('SELECT file_bytes, mime_type, filename FROM media_storage WHERE content_id = ?', (backup['content_id'],)).fetchone()
+            if media_row and media_row['file_bytes']:
+                raw = media_row['file_bytes']
+                data_to_sync = raw.tobytes() if isinstance(raw, memoryview) else bytes(raw)
+                if media_row['mime_type']:
+                    mime = media_row['mime_type']
+                if media_row['filename']:
+                    filename_to_sync = media_row['filename']
+
+        # 3. Check if user sent a file in request
+        if not data_to_sync and 'file' in request.files:
+            up_file = request.files['file']
+            if up_file and up_file.filename:
+                data_to_sync = up_file.read()
+                filename_to_sync = secure_filename(up_file.filename)
+
+        if not data_to_sync:
+            return jsonify({
+                'success': False,
+                'message': '⚠️ या जुन्या नोंदीची फाइल सर्व्हरवर उपलब्ध नाही (जुनी स्थानिक फाइल). कृपया ही नोंद 🗑 हटवा आणि "➕ कंटेंट जोडा" वरून नवीन व्हिडिओ अपलोड करा.'
+            }), 404
+
+        ok, drive_result = upload_to_google_drive(data_to_sync, filename_to_sync, mime)
         if ok and isinstance(drive_result, dict):
             drive_url = drive_result.get('viewUrl', '')
             file_id = drive_result.get('fileId', '')
             direct_url = drive_result.get('directUrl', '') or (f"https://lh3.googleusercontent.com/d/{file_id}" if file_id else drive_url)
             preview_url = drive_result.get('previewUrl', '') or (f"https://drive.google.com/file/d/{file_id}/preview" if file_id else drive_url)
-            media_url = direct_url if ext in ['png', 'jpg', 'jpeg', 'gif'] else preview_url
+            media_url = direct_url if ext in ['png', 'jpg', 'jpeg', 'gif', 'webp'] else preview_url
 
-            # Check if content belonged to creator
-            is_creator_content = False
-            if backup['content_id']:
-                content_row = conn.execute('SELECT author_role FROM content WHERE id = ?', (backup['content_id'],)).fetchone()
-                if content_row and content_row['author_role'] == 'creator':
-                    is_creator_content = True
-
-            new_local_path = backup['local_path']
-            # If it was creator content, delete local file so it is stored strictly in Google Drive
-            if is_creator_content:
-                try:
-                    if os.path.exists(local_path):
-                        os.remove(local_path)
-                    new_local_path = '[Google Drive Cloud - Not Stored Locally]'
-                except Exception:
-                    pass
-
+            new_local_path = '[Google Drive Cloud - Not Stored Locally]'
             conn.execute("UPDATE backup_storage SET google_drive_url = ?, local_path = ?, backup_status = 'synced' WHERE id = ?", (drive_url, new_local_path, backup_id))
             if backup['content_id']:
                 conn.execute('UPDATE content SET google_drive_url = ?, media_url = ? WHERE id = ?', (drive_url, media_url, backup['content_id']))
             conn.commit()
-            return jsonify({'success': True, 'message': 'Google Drive वर यशस्वीरीत्या बॅकअप झाला आणि स्थानिक डिस्क रिकामी केली गेली!', 'drive_url': drive_url})
+            return jsonify({'success': True, 'message': 'Google Drive वर यशस्वीरीत्या बॅकअप झाला!', 'drive_url': drive_url})
         else:
             err_msg = drive_result if isinstance(drive_result, str) else 'Google Drive upload failed.'
             return jsonify({'success': False, 'message': f'Sync failed: {err_msg}'}), 400
