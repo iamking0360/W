@@ -846,6 +846,29 @@ def init_db():
         )
     ''')
 
+    # Media storage table (for native HTML5 streaming without permission blocks)
+    cursor.execute(f'''
+        CREATE TABLE IF NOT EXISTS media_storage (
+            content_id INTEGER PRIMARY KEY,
+            file_bytes {byte_type} NOT NULL,
+            mime_type VARCHAR(100) DEFAULT 'video/mp4',
+            filename VARCHAR(255),
+            file_size BIGINT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    cursor.execute(f'''
+        CREATE TABLE IF NOT EXISTS upload_ready (
+            upload_id VARCHAR(100) PRIMARY KEY,
+            full_data {byte_type} NOT NULL,
+            filename VARCHAR(255),
+            mime_type VARCHAR(100),
+            file_size BIGINT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
     # Cyber defense and threat protection logs
     cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS security_logs (
@@ -1873,6 +1896,28 @@ def submit_content():
               author_name, user_role, status, approval_token, creator_email))
         content_id = cursor.lastrowid
 
+        # If content was uploaded via chunked pipeline, link to media_storage for instant native streaming
+        upload_id = request.form.get('upload_id', '').strip()
+        if upload_id:
+            cursor.execute('SELECT full_data, filename, mime_type, file_size FROM upload_ready WHERE upload_id = ?', (upload_id,))
+            ready_row = cursor.fetchone()
+            if ready_row:
+                direct_stream_url = f"/api/video/{content_id}"
+                if IS_POSTGRES:
+                    cursor.execute('''
+                        INSERT INTO media_storage (content_id, file_bytes, mime_type, filename, file_size)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (content_id) DO UPDATE SET file_bytes = EXCLUDED.file_bytes
+                    ''', (content_id, ready_row['full_data'], ready_row['mime_type'], ready_row['filename'], ready_row['file_size']))
+                else:
+                    cursor.execute('''
+                        INSERT OR REPLACE INTO media_storage (content_id, file_bytes, mime_type, filename, file_size)
+                        VALUES (?, ?, ?, ?, ?)
+                    ''', (content_id, ready_row['full_data'], ready_row['mime_type'], ready_row['filename'], ready_row['file_size']))
+                cursor.execute('DELETE FROM upload_ready WHERE upload_id = ?', (upload_id,))
+                cursor.execute('UPDATE content SET media_url = ?, media_type = ? WHERE id = ?', (direct_stream_url, 'video', content_id))
+                media_url = direct_stream_url
+
         # Add to backup_storage table
         if backup_filename:
             backup_status = 'synced' if google_drive_url else 'local'
@@ -2324,30 +2369,81 @@ def upload_chunk():
 
     unique_filename = f"{uuid.uuid4().hex[:8]}_{filename}"
 
+    # Cache assembled video in upload_ready for instant HTML5 streaming without permission blocks
+    conn_ready = get_db_connection()
+    try:
+        cur_ready = conn_ready.cursor()
+        if IS_POSTGRES:
+            cur_ready.execute('''
+                INSERT INTO upload_ready (upload_id, full_data, filename, mime_type, file_size)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (upload_id) DO UPDATE SET full_data = EXCLUDED.full_data
+            ''', (upload_id, psycopg2.Binary(full_bytes) if HAVE_PSYCOPG2 else bytes(full_bytes), unique_filename, mime_type, total_size))
+        else:
+            cur_ready.execute('''
+                INSERT OR REPLACE INTO upload_ready (upload_id, full_data, filename, mime_type, file_size)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (upload_id, sqlite3.Binary(full_bytes), unique_filename, mime_type, total_size))
+        conn_ready.commit()
+    except Exception as e:
+        print(f"[WARN] Could not cache to upload_ready: {e}")
+    finally:
+        conn_ready.close()
+
     # Upload the assembled video to Google Drive via Google Apps Script (from python server)
     ok_drive, drive_res = upload_to_google_drive(bytes(full_bytes), unique_filename, mime_type)
+    file_id = ''
+    view_url = ''
+    direct_url = ''
+    preview_url = ''
     if ok_drive and isinstance(drive_res, dict):
         file_id = drive_res.get('fileId', '')
         view_url = drive_res.get('fileUrl') or drive_res.get('viewUrl') or ''
         direct_url = drive_res.get('directUrl') or (f"https://lh3.googleusercontent.com/d/{file_id}" if file_id else view_url)
         preview_url = drive_res.get('previewUrl') or (f"https://drive.google.com/file/d/{file_id}/preview" if file_id else view_url)
 
-        return jsonify({
-            'success': True,
-            'completed': True,
-            'file_id': file_id,
-            'file_url': view_url,
-            'preview_url': preview_url,
-            'direct_url': direct_url,
-            'file_size': total_size,
-            'filename': unique_filename
-        })
-    else:
-        err_msg = drive_res if isinstance(drive_res, str) else 'Google Drive upload error'
-        return jsonify({
-            'success': False,
-            'message': f'Google Drive वर व्हिडिओ साठवताना अडचण आली: {err_msg}'
-        }), 502
+    return jsonify({
+        'success': True,
+        'completed': True,
+        'upload_id': upload_id,
+        'file_id': file_id,
+        'file_url': view_url,
+        'preview_url': preview_url,
+        'direct_url': direct_url,
+        'file_size': total_size,
+        'filename': unique_filename
+    })
+
+
+@app.route('/api/video/<int:content_id>', methods=['GET'])
+def stream_content_video(content_id):
+    """Streams stored video natively for HTML5 video player."""
+    conn = get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute('SELECT file_bytes, mime_type FROM media_storage WHERE content_id = ?', (content_id,))
+        row = cur.fetchone()
+        if row and row['file_bytes']:
+            raw_bytes = bytes(row['file_bytes'])
+            return Response(raw_bytes, mimetype=row['mime_type'] or 'video/mp4', headers={
+                'Accept-Ranges': 'bytes',
+                'Content-Length': str(len(raw_bytes)),
+                'Cache-Control': 'public, max-age=86400'
+            })
+
+        # Fallback to content record google_drive_url or media_url
+        cur.execute('SELECT media_url, google_drive_url FROM content WHERE id = ?', (content_id,))
+        c = cur.fetchone()
+        if c:
+            drive_url = c['google_drive_url'] or c['media_url']
+            if drive_url and 'drive.google.com' in drive_url:
+                m = re.search(r'/file/d/([a-zA-Z0-9_-]+)', drive_url) or re.search(r'id=([a-zA-Z0-9_-]+)', drive_url)
+                if m:
+                    return redirect(f"https://drive.google.com/file/d/{m.group(1)}/preview")
+                return redirect(drive_url)
+        return jsonify({'error': 'Video stream not found'}), 404
+    finally:
+        conn.close()
 
 
 @app.route('/api/admin/security-status', methods=['GET'])

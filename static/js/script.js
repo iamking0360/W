@@ -439,16 +439,17 @@ function createCardHTML(item) {
       </div>`;
   } else if (item.media_type === 'video') {
     let videoSrc = item.media_url || item.google_drive_url;
+    let driveUrl = item.google_drive_url || videoSrc;
     let thumbUrl = '/static/images/hero_wavelvadi.svg';
-    let playTarget = videoSrc;
-    if (videoSrc && (videoSrc.includes('drive.google.com') || hasDrive)) {
-      let dUrl = item.google_drive_url || videoSrc;
-      let fileIdMatch = dUrl.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || dUrl.match(/id=([a-zA-Z0-9_-]+)/);
-      playTarget = fileIdMatch ? `https://drive.google.com/file/d/${fileIdMatch[1]}/preview` : dUrl;
-      thumbUrl = fileIdMatch ? `https://lh3.googleusercontent.com/d/${fileIdMatch[1]}` : thumbUrl;
+    let playTarget = (item.media_url && item.media_url.startsWith('/api/video/')) ? item.media_url : (item.id ? `/api/video/${item.id}` : videoSrc);
+    if (driveUrl && (driveUrl.includes('drive.google.com') || hasDrive)) {
+      let fileIdMatch = driveUrl.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || driveUrl.match(/id=([a-zA-Z0-9_-]+)/);
+      if (fileIdMatch) {
+        thumbUrl = `https://lh3.googleusercontent.com/d/${fileIdMatch[1]}`;
+      }
     }
     mediaEl = `
-      <div class="card-media-wrapper yt-wrapper" onclick="openWebsiteVideoModal('${playTarget}', '${escapeHTML(title)}')" style="cursor:pointer; background:#0F172A;" title="वेबसाइटवर व्हिडिओ पहा">
+      <div class="card-media-wrapper yt-wrapper" onclick="openWebsiteVideoModal('${playTarget}', '${escapeHTML(title)}', '', 0, '${escapeHTML(driveUrl)}')" style="cursor:pointer; background:#0F172A;" title="वेबसाइटवर व्हिडिओ पहा">
         <img src="${thumbUrl}" alt="${escapeHTML(title)}" loading="lazy" onerror="this.src='/static/images/hero_wavelvadi.svg'" style="width:100%; height:100%; object-fit:cover; opacity:0.88;" />
         <div class="yt-play-icon">
           <svg viewBox="0 0 68 48" style="width:48px; height:48px;">
@@ -482,7 +483,7 @@ function createCardHTML(item) {
         <span>↗</span> YouTube
        </a>`
     : (item.media_type === 'video'
-      ? `<button type="button" onclick="openWebsiteVideoModal('${item.media_url || item.google_drive_url}', '${escapeHTML(title)}')" class="card-yt-link card-play-action" title="वेबसाइटवर व्हिडिओ पहा">
+      ? `<button type="button" onclick="openWebsiteVideoModal('${(item.media_url && item.media_url.startsWith('/api/video/')) ? item.media_url : (item.id ? `/api/video/${item.id}` : (item.media_url || item.google_drive_url))}', '${escapeHTML(title)}', '', 0, '${escapeHTML(item.google_drive_url || '')}')" class="card-yt-link card-play-action" title="वेबसाइटवर व्हिडिओ पहा">
           <span>▶</span> व्हिडिओ पहा
          </button>`
       : '');
@@ -547,7 +548,7 @@ function extractYouTubeStartTime(url) {
   return 0;
 }
 
-function openWebsiteVideoModal(source, title, watchUrl, startTime) {
+function openWebsiteVideoModal(source, title, watchUrl, startTime, fallbackDriveUrl) {
   const modal = document.getElementById('videoPlayerModal');
   const frameContainer = document.getElementById('videoModalFrameContainer');
   const titleEl = document.getElementById('videoModalTitle');
@@ -569,26 +570,62 @@ function openWebsiteVideoModal(source, title, watchUrl, startTime) {
         frameborder="0"
         allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
         referrerpolicy="strict-origin-when-cross-origin"
-        allowfullscreen></iframe>
+        allowfullscreen
+        style="width:100%; height:100%; min-height:400px; border:none; border-radius:8px;"></iframe>
     `;
     if (directBtn) {
       directBtn.href = watchUrl || `https://www.youtube.com/watch?v=${ytId}`;
+      directBtn.innerText = '🎬 YouTube वर उघडा (Open on YouTube)';
       directBtn.style.display = 'inline-flex';
+    }
+  } else if (source && (source.startsWith('/api/video/') || source.endsWith('.mp4') || source.endsWith('.webm') || source.endsWith('.mov') || source.startsWith('/uploads/') || source.startsWith('data:video/'))) {
+    // Native HTML5 video player - plays instantly with full controls!
+    const driveLink = fallbackDriveUrl || '';
+    frameContainer.innerHTML = `
+      <div style="background:#000; border-radius:8px; overflow:hidden; display:flex; flex-direction:column; align-items:center;">
+        <video src="${source}" controls autoplay playsinline style="width:100%; max-height:460px; object-fit:contain; background:#000;"></video>
+        ${driveLink ? `
+        <div style="width:100%; padding:0.6rem 1rem; background:#0F172A; display:flex; justify-content:space-between; align-items:center; border-top:1px solid #334155;">
+          <span style="color:#94A3B8; font-size:0.82rem;">☁️ Google Drive क्लाउड बॅकअप उपलब्ध आहे</span>
+          <a href="${driveLink}" target="_blank" rel="noopener noreferrer" class="btn btn-primary btn-sm" style="background:#0284C7; font-size:0.8rem; padding:0.3rem 0.7rem;">
+            📁 Drive वर उघडा
+          </a>
+        </div>` : ''}
+      </div>
+    `;
+    if (directBtn) {
+      if (driveLink) {
+        directBtn.href = driveLink;
+        directBtn.innerText = '📁 Google Drive वर पहा';
+        directBtn.style.display = 'inline-flex';
+      } else {
+        directBtn.style.display = 'none';
+      }
     }
   } else if (source && (source.includes('drive.google.com') || source.match(/\/file\/d\/[a-zA-Z0-9_-]+/))) {
     const m = source.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || source.match(/id=([a-zA-Z0-9_-]+)/);
-    const dEmbed = m ? `https://drive.google.com/file/d/${m[1]}/preview` : source;
-    frameContainer.innerHTML = `<iframe src="${dEmbed}" allow="autoplay; fullscreen" style="width:100%; height:100%; min-height:400px; border:none; border-radius:8px;"></iframe>`;
+    const fileId = m ? m[1] : '';
+    const dEmbed = fileId ? `https://drive.google.com/file/d/${fileId}/preview` : source;
+    const dDirect = fileId ? `https://drive.google.com/file/d/${fileId}/view?usp=sharing` : source;
+
+    frameContainer.innerHTML = `
+      <div style="position:relative; width:100%; height:100%; min-height:420px; background:#0F172A; border-radius:8px; overflow:hidden;">
+        <iframe src="${dEmbed}" allow="autoplay; fullscreen" style="width:100%; height:100%; min-height:420px; border:none;"></iframe>
+        <div style="padding:0.6rem 1rem; background:rgba(15,23,42,0.96); display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.5rem; border-top:1px solid #334155;">
+          <span style="color:#CBD5E1; font-size:0.85rem;">🎬 व्हिडिओ प्ले होत नसल्यास थेट Google Drive वर उघडा:</span>
+          <a href="${dDirect}" target="_blank" rel="noopener noreferrer" class="btn btn-primary btn-sm" style="background:#0284C7; font-size:0.85rem; padding:0.35rem 0.8rem;">
+            ▶️ Google Drive वर प्ले करा
+          </a>
+        </div>
+      </div>
+    `;
     if (directBtn) {
-      directBtn.href = m ? `https://drive.google.com/file/d/${m[1]}/view` : source;
+      directBtn.href = dDirect;
       directBtn.innerText = '📁 Google Drive वर पहा';
       directBtn.style.display = 'inline-flex';
     }
-  } else if (source && (source.endsWith('.mp4') || source.endsWith('.webm') || source.endsWith('.mov') || source.startsWith('/uploads/') || source.startsWith('data:video/'))) {
-    frameContainer.innerHTML = `<video src="${source}" controls autoplay style="width:100%; height:100%; max-height:480px; object-fit:contain; border-radius:8px;"></video>`;
-    if (directBtn) directBtn.style.display = 'none';
   } else if (source) {
-    frameContainer.innerHTML = `<video src="${source}" controls autoplay style="width:100%; height:100%; max-height:480px; object-fit:contain; border-radius:8px;"></video>`;
+    frameContainer.innerHTML = `<video src="${source}" controls autoplay playsinline style="width:100%; height:100%; max-height:480px; object-fit:contain; border-radius:8px; background:#000;"></video>`;
     if (directBtn) directBtn.style.display = 'none';
   }
 
@@ -1593,6 +1630,9 @@ async function handleContentSubmit(e) {
 
       // Remove binary file from formData so the final submit request is tiny (< 2 KB)
       formData.delete('media_file');
+      if (uploadResult && uploadResult.upload_id) {
+        formData.set('upload_id', uploadResult.upload_id);
+      }
       formData.set('google_drive_url', uploadResult.file_url || '');
       formData.set('media_url', uploadResult.preview_url || uploadResult.direct_url || uploadResult.file_url || '');
       formData.set('media_type', isVideo ? 'video' : 'image');
