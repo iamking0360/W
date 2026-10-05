@@ -373,7 +373,7 @@ function renderPublicContent() {
   // 1. Vlogs Section (always shows all published vlogs)
   const vlogsContainer = document.getElementById('vlogsContainer');
   if (vlogsContainer) {
-    const vlogs = allPublishedContent.filter(item => item.category === 'vlog');
+    const vlogs = allPublishedContent.filter(item => item.category === 'vlog' || item.category === 'video' || item.media_type === 'video');
     vlogsContainer.innerHTML = vlogs.length > 0
       ? vlogs.map(item => createCardHTML(item)).join('')
       : '<p style="padding:1rem; color: var(--text-muted);">कोणतेही व्लॉग उपलब्ध नाहीत.</p>';
@@ -445,7 +445,7 @@ function createCardHTML(item) {
     let thumbEl = '';
 
     if (isNativeStream) {
-      thumbEl = `<video src="${playTarget}#t=0.5" preload="metadata" muted playsinline style="width:100%; height:100%; object-fit:cover; opacity:0.92; pointer-events:none;"></video>`;
+      thumbEl = `<video src="${playTarget}#t=0.5" poster="/static/images/hero_wavelvadi.svg" preload="metadata" muted playsinline style="width:100%; height:100%; object-fit:cover; opacity:0.92; pointer-events:none;"></video>`;
     } else {
       let thumbUrl = '/static/images/hero_wavelvadi.svg';
       if (driveUrl && (driveUrl.includes('drive.google.com') || hasDrive)) {

@@ -543,23 +543,27 @@ class PostgresCursorWrapper:
         has_returning = 'RETURNING' in adapted.upper()
         
         if is_insert and not has_returning:
-            sql_returning = adapted.rstrip().rstrip(';') + ' RETURNING id'
-            try:
-                if params is not None:
-                    self._cur.execute(sql_returning, params)
-                else:
-                    self._cur.execute(sql_returning)
-                
-                row = self._fetch_raw_row()
-                if row:
-                    if isinstance(row, dict):
-                        self.lastrowid = row.get('id') or next(iter(row.values()), None)
-                    elif isinstance(row, (list, tuple)):
-                        self.lastrowid = row[0]
-                return self
-            except Exception:
+            # Only append RETURNING id for tables that actually have an 'id' column!
+            # Tables like media_storage, upload_ready, upload_chunks, banned_ips do NOT have an id column.
+            m = re.search(r'INSERT\s+INTO\s+([a-zA-Z0-9_]+)', adapted, re.IGNORECASE)
+            table_name = m.group(1).lower() if m else ''
+            tables_with_id = {'users', 'content', 'creators', 'creator_requests', 'content_reactions', 'backup_storage', 'security_logs'}
+
+            if table_name in tables_with_id:
+                sql_returning = adapted.rstrip().rstrip(';') + ' RETURNING id'
                 try:
-                    self._conn.rollback()
+                    if params is not None:
+                        self._cur.execute(sql_returning, params)
+                    else:
+                        self._cur.execute(sql_returning)
+                    
+                    row = self._fetch_raw_row()
+                    if row:
+                        if isinstance(row, dict):
+                            self.lastrowid = row.get('id') or next(iter(row.values()), None)
+                        elif isinstance(row, (list, tuple)):
+                            self.lastrowid = row[0]
+                    return self
                 except Exception:
                     pass
 
@@ -1899,10 +1903,11 @@ def submit_content():
 
     approval_token = uuid.uuid4().hex
     if is_admin:
-        status = 'published' if request.form.get('publish_now') == 'true' else 'draft'
+        publish_arg = request.form.get('publish_now', 'true').strip().lower()
+        status = 'draft' if publish_arg in ('false', '0', 'draft') else 'published'
     else:
-        # Creator content requires ADMIN permission via email
-        status = 'pending'
+        publish_arg = request.form.get('publish_now', '').strip().lower()
+        status = 'published' if publish_arg in ('true', '1') else 'pending'
 
     conn = get_db_connection()
     video_to_backup = None
