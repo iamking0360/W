@@ -343,9 +343,9 @@ def test_google_script_connection():
             'apiKey': GOOGLE_SCRIPT_SECRET
         }
         try:
-            res = requests.post(GOOGLE_SCRIPT_URL, json=payload, timeout=10)
+            res = requests.post(GOOGLE_SCRIPT_URL, json=payload, timeout=30)
         except requests.exceptions.SSLError:
-            res = requests.post(GOOGLE_SCRIPT_URL, json=payload, verify=False, timeout=10)
+            res = requests.post(GOOGLE_SCRIPT_URL, json=payload, verify=False, timeout=30)
 
         if res.status_code == 200:
             try:
@@ -364,6 +364,8 @@ def test_google_script_connection():
                 return False, f"Unexpected response: {res.text[:200]}"
         else:
             return False, f"HTTP Error status code: {res.status_code}"
+    except requests.exceptions.Timeout:
+        return False, "Google Apps Script प्रतिसाद वेळ संपली (Timeout). गुगल सर्व्हर जागे होण्यास थोडा वेळ लागत आहे, कृपया पुन्हा प्रयत्न करा."
     except Exception as e:
         return False, f"Connection failed: {str(e)}"
 
@@ -1557,16 +1559,23 @@ def submit_content():
     description_mr = request.form.get('description_mr', '').strip()
     description_en = request.form.get('description_en', '').strip() or description_mr
     youtube_url = request.form.get('youtube_url', '').strip()
-    google_drive_url = ''
+    google_drive_url = request.form.get('google_drive_url', '').strip()
+    media_url = request.form.get('media_url', '').strip()
+    media_type = request.form.get('media_type', 'image').strip()
+    backup_filename = request.form.get('backup_filename', None)
+    backup_size = int(request.form.get('backup_size', 0) or 0)
+    saved_filepath = None
 
     if not title_mr or not category:
         return jsonify({'success': False, 'message': 'Title and category are required.'}), 400
 
-    media_url = ''
-    media_type = 'image'
-    backup_filename = None
-    backup_size = 0
-    saved_filepath = None
+    if google_drive_url:
+        m = re.search(r'/file/d/([a-zA-Z0-9_-]+)', google_drive_url) or re.search(r'id=([a-zA-Z0-9_-]+)', google_drive_url)
+        if m:
+            file_id = m.group(1)
+            direct_url = f"https://lh3.googleusercontent.com/d/{file_id}"
+            preview_url = f"https://drive.google.com/file/d/{file_id}/preview"
+            media_url = direct_url if media_type == 'image' else preview_url
 
     if 'media_file' in request.files:
         file = request.files['media_file']
@@ -1991,6 +2000,18 @@ def get_google_script_config():
         'script_url': GOOGLE_SCRIPT_URL,
         'configured': bool(GOOGLE_SCRIPT_URL),
         'script_code': script_code
+    })
+
+
+@app.route('/api/upload-config', methods=['GET'])
+@login_required
+def get_upload_config():
+    """Provides client-side direct Google Drive upload parameters for Creators and ADMIN."""
+    return jsonify({
+        'success': True,
+        'google_script_url': GOOGLE_SCRIPT_URL,
+        'google_script_secret': GOOGLE_SCRIPT_SECRET,
+        'max_video_size_mb': 10
     })
 
 

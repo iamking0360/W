@@ -1487,8 +1487,55 @@ async function deleteBackupRecord(backupId) {
 
 
 // ==========================================
-// CONTENT SUBMISSION (ADMIN ONLY)
 // ==========================================
+// CONTENT SUBMISSION (ADMIN & CREATOR)
+// ==========================================
+function readFileAsBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result || '';
+      const commaIdx = result.indexOf(',');
+      if (commaIdx !== -1) {
+        resolve(result.slice(commaIdx + 1));
+      } else {
+        resolve(result);
+      }
+    };
+    reader.onerror = (err) => reject(err);
+    reader.readAsDataURL(file);
+  });
+}
+
+async function uploadDirectToGoogleDrive(file, scriptUrl, scriptSecret) {
+  const base64Data = await readFileAsBase64(file);
+  const payload = {
+    action: 'upload',
+    apiKey: scriptSecret,
+    data: base64Data,
+    fileName: file.name,
+    mimeType: file.type || 'video/mp4'
+  };
+
+  const res = await fetch(scriptUrl, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+    headers: {
+      'Content-Type': 'text/plain;charset=utf-8'
+    }
+  });
+
+  if (!res.ok) {
+    throw new Error(`Google Apps Script HTTP Error: ${res.status}`);
+  }
+
+  const data = await res.json();
+  if (!data || !data.success) {
+    throw new Error((data && data.error) || 'Google Drive वर फाईल अपलोड अयशस्वी झाली.');
+  }
+  return data;
+}
+
 async function handleContentSubmit(e) {
   e.preventDefault();
   const form = document.getElementById('addContentForm');
@@ -1521,17 +1568,64 @@ async function handleContentSubmit(e) {
     formData.set('publish_now', 'true');
   }
 
-  msgBox.style.color = '#B45309';
-  msgBox.innerText = isVideo 
-    ? `🎬 व्हिडिओ अपलोड होत आहे (${sizeMB} MB)... कृपया थोडा वेळ थांबा.` 
-    : '📤 मजकूर अपलोड होत आहे...';
-
   if (submitBtn) {
     submitBtn.disabled = true;
-    submitBtn.innerText = '⏳ अपलोड होत आहे...';
+    submitBtn.innerText = '⏳ प्रक्रिया सुरू आहे...';
   }
 
   try {
+    // If a video or large file (> 3 MB) is selected, upload directly to Google Drive
+    // via Google Apps Script to bypass Vercel's strict 4.5 MB request payload limit.
+    const isLargeMedia = file && (isVideo || file.size > 3 * 1024 * 1024);
+
+    if (isLargeMedia) {
+      msgBox.style.color = '#B45309';
+      msgBox.innerText = `☁️ मोठा व्हिडिओ थेट Google Drive वर सुरक्षित अपलोड होत आहे (${sizeMB} MB)... कृपया थांबा.`;
+
+      let uploadConfig = null;
+      try {
+        const cfgRes = await fetch('/api/upload-config');
+        uploadConfig = await cfgRes.json();
+      } catch (cfgErr) {
+        console.warn('Could not fetch upload-config:', cfgErr);
+      }
+
+      if (uploadConfig && uploadConfig.google_script_url) {
+        try {
+          const driveRes = await uploadDirectToGoogleDrive(
+            file,
+            uploadConfig.google_script_url,
+            uploadConfig.google_script_secret || ''
+          );
+
+          // Remove the binary file from FormData so Vercel receives only tiny metadata (< 2 KB)
+          formData.delete('media_file');
+          formData.set('google_drive_url', driveRes.fileUrl || driveRes.viewUrl || '');
+          formData.set('media_url', driveRes.previewUrl || driveRes.directUrl || driveRes.fileUrl || '');
+          formData.set('media_type', isVideo ? 'video' : 'image');
+          formData.set('backup_filename', file.name);
+          formData.set('backup_size', file.size.toString());
+
+          msgBox.style.color = '#059669';
+          msgBox.innerText = '✅ Google Drive वर व्हिडिओ सुरक्षित झाला! आता माहिती सेव्ह होत आहे...';
+        } catch (driveErr) {
+          console.error('Direct Google Drive upload error:', driveErr);
+          if (file.size > 4 * 1024 * 1024) {
+            msgBox.style.color = '#DC2626';
+            msgBox.innerText = `⚠️ Google Drive वर व्हिडिओ अपलोड करताना त्रुटी आली (${driveErr.message || 'Timeout'}). कृपया थोड्या वेळाने प्रयत्न करा किंवा YouTube लिंक वापरा.`;
+            if (submitBtn) {
+              submitBtn.disabled = false;
+              submitBtn.innerText = '📤 कंटेंट सबमिट करा';
+            }
+            return;
+          }
+        }
+      }
+    } else {
+      msgBox.style.color = '#B45309';
+      msgBox.innerText = '📤 मजकूर अपलोड होत आहे...';
+    }
+
     const res = await fetch('/api/content/submit', {
       method: 'POST',
       body: formData
@@ -1541,14 +1635,15 @@ async function handleContentSubmit(e) {
     try {
       data = await res.json();
     } catch {
-      data = { success: false, message: res.status === 413 ? 'फाइल खूप मोठी आहे (Payload Too Large).' : `सर्व्हर त्रुटी: HTTP ${res.status}` };
+      data = { success: false, message: res.status === 413 ? 'फाइल खूप मोठी आहे (Vercel Payload Limit exceeded).' : `सर्व्हर त्रुटी: HTTP ${res.status}` };
     }
 
     if (data.success) {
       msgBox.style.color = 'green';
       msgBox.innerText = data.message;
       form.reset();
-      document.getElementById('uploadPreview').style.display = 'none';
+      const previewEl = document.getElementById('uploadPreview');
+      if (previewEl) previewEl.style.display = 'none';
       setTimeout(() => {
         closeModal('addContentModal');
         loadPublicContent();
@@ -1558,6 +1653,7 @@ async function handleContentSubmit(e) {
       msgBox.innerText = data.message || 'अपलोड अयशस्वी झाले.';
     }
   } catch (err) {
+    console.error('Submit error:', err);
     msgBox.style.color = 'red';
     msgBox.innerText = 'अपलोड करताना त्रुटी आली. इंटरनेट तपासा आणि पुन्हा प्रयत्न करा.';
   } finally {
