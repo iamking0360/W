@@ -128,6 +128,7 @@ function doPost(e) {
         fileId: fileId,
         fileName: fileName,
         viewUrl: viewUrl,
+        fileUrl: viewUrl,
         downloadUrl: downloadUrl,
         directUrl: directUrl,
         previewUrl: previewUrl,

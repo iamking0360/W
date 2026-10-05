@@ -463,7 +463,10 @@ function createCardHTML(item) {
     }
   } else {
     let imgSrc = item.media_url || '/static/images/hero_wavelvadi.svg';
-    if (hasDrive && (!item.media_url || item.media_url.startsWith('/static/'))) {
+    if (imgSrc && imgSrc.includes('drive.google.com')) {
+      let fileIdMatch = imgSrc.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || imgSrc.match(/id=([a-zA-Z0-9_-]+)/);
+      if (fileIdMatch) imgSrc = `https://lh3.googleusercontent.com/d/${fileIdMatch[1]}`;
+    } else if (hasDrive && (!item.media_url || item.media_url.startsWith('/static/'))) {
       let fileIdMatch = item.google_drive_url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || item.google_drive_url.match(/id=([a-zA-Z0-9_-]+)/);
       if (fileIdMatch) imgSrc = `https://lh3.googleusercontent.com/d/${fileIdMatch[1]}`;
     }
