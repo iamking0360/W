@@ -1498,10 +1498,20 @@ async function handleContentSubmit(e) {
   const file = fileInput ? fileInput.files[0] : null;
   const submitBtn = form.querySelector('button[type="submit"]');
 
-  // File size validation (max 45MB)
-  if (file && file.size > 45 * 1024 * 1024) {
+  const isVideo = file && (file.type.startsWith('video/') || /\.(mp4|webm|mov|mkv|avi|m4v|3gp|ogg|ogv)$/i.test(file.name));
+  const sizeMB = file ? (file.size / (1024 * 1024)).toFixed(1) : 0;
+
+  // Strict 10 MB limit for videos
+  if (isVideo && file.size > 10 * 1024 * 1024) {
     msgBox.style.color = '#DC2626';
-    msgBox.innerText = '⚠️ फाइल खूप मोठी आहे (कमाल मर्यादा ४५ MB). कृपया फाइल लहान करा किंवा YouTube लिंक जोडा.';
+    msgBox.innerText = `⚠️ निवडलेली व्हिडिओ फाइल ${sizeMB} MB आहे. थेट अपलोडसाठी कमाल मर्यादा १० MB आहे. कृपया व्हिडिओ १० MB पेक्षा लहान करा किंवा YouTube लिंक वापरा.`;
+    return;
+  }
+
+  // General file size limit (15MB for images/docs)
+  if (!isVideo && file && file.size > 15 * 1024 * 1024) {
+    msgBox.style.color = '#DC2626';
+    msgBox.innerText = `⚠️ फाइल खूप मोठी आहे (${sizeMB} MB). कमाल मर्यादा १५ MB आहे.`;
     return;
   }
 
@@ -1510,9 +1520,6 @@ async function handleContentSubmit(e) {
   if (publishCheck && publishCheck.checked) {
     formData.set('publish_now', 'true');
   }
-
-  const isVideo = file && (file.type.startsWith('video/') || /\.(mp4|webm|mov|mkv|avi|m4v|3gp)$/i.test(file.name));
-  const sizeMB = file ? (file.size / (1024 * 1024)).toFixed(1) : 0;
 
   msgBox.style.color = '#B45309';
   msgBox.innerText = isVideo 
@@ -1573,6 +1580,20 @@ function initMediaPreview() {
 
     preview.style.display = 'block';
     preview.innerHTML = '';
+
+    const isVid = file.type.startsWith('video/') || /\.(mp4|webm|mov|mkv|avi|m4v|3gp|ogg|ogv)$/i.test(file.name);
+    const sizeMB = (file.size / (1024 * 1024)).toFixed(1);
+
+    // Immediate check on file selection for 10 MB video limit
+    if (isVid && file.size > 10 * 1024 * 1024) {
+      preview.innerHTML = `
+        <div style="background:#FEE2E2; border:1px solid #FCA5A5; color:#991B1B; padding:0.6rem 0.8rem; border-radius:8px; font-size:0.85rem; line-height:1.4;">
+          ⚠️ <strong>व्हिडिओ १० MB पेक्षा जास्त आहे (${sizeMB} MB)</strong><br>
+          थेट व्हिडिओ अपलोडसाठी कमाल मर्यादा <strong>१० MB</strong> आहे. कृपया व्हिडिओ कॉम्प्रेश करा किंवा वर <strong>YouTube लिंक</strong> वापरा.
+        </div>`;
+      fileInput.value = '';
+      return;
+    }
 
     if (file.type.startsWith('image/')) {
       const img = document.createElement('img');

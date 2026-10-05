@@ -1588,6 +1588,14 @@ def submit_content():
             backup_size = len(file_bytes)
             backup_filename = unique_name
 
+            # Enforce 10 MB maximum limit for video files
+            if media_type == 'video' and backup_size > 10 * 1024 * 1024:
+                size_mb = round(backup_size / (1024 * 1024), 2)
+                return jsonify({
+                    'success': False,
+                    'message': f'व्हिडिओ फाईल खूप मोठी आहे ({size_mb} MB). थेट व्हिडिओ अपलोडसाठी कमाल मर्यादा १० MB आहे. कृपया व्हिडिओ कॉम्प्रेश करा किंवा YouTube लिंक वापरा.'
+                }), 400
+
             # Google Drive Cloud upload (Direct to Drive, fast, and resilient)
             ok_drive = False
             drive_res = None
