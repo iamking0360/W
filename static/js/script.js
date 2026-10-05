@@ -440,17 +440,24 @@ function createCardHTML(item) {
   } else if (item.media_type === 'video') {
     let videoSrc = item.media_url || item.google_drive_url;
     let driveUrl = item.google_drive_url || videoSrc;
-    let thumbUrl = '/static/images/hero_wavelvadi.svg';
     let playTarget = (item.media_url && item.media_url.startsWith('/api/video/')) ? item.media_url : (item.id ? `/api/video/${item.id}` : videoSrc);
-    if (driveUrl && (driveUrl.includes('drive.google.com') || hasDrive)) {
-      let fileIdMatch = driveUrl.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || driveUrl.match(/id=([a-zA-Z0-9_-]+)/);
-      if (fileIdMatch) {
-        thumbUrl = `https://lh3.googleusercontent.com/d/${fileIdMatch[1]}`;
+    let isNativeStream = playTarget && playTarget.startsWith('/api/video/');
+    let thumbEl = '';
+
+    if (isNativeStream) {
+      thumbEl = `<video src="${playTarget}#t=0.5" preload="metadata" muted playsinline style="width:100%; height:100%; object-fit:cover; opacity:0.92; pointer-events:none;"></video>`;
+    } else {
+      let thumbUrl = '/static/images/hero_wavelvadi.svg';
+      if (driveUrl && (driveUrl.includes('drive.google.com') || hasDrive)) {
+        let fileIdMatch = driveUrl.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || driveUrl.match(/id=([a-zA-Z0-9_-]+)/);
+        if (fileIdMatch) thumbUrl = `https://lh3.googleusercontent.com/d/${fileIdMatch[1]}`;
       }
+      thumbEl = `<img src="${thumbUrl}" alt="${escapeHTML(title)}" loading="lazy" onerror="this.src='/static/images/hero_wavelvadi.svg'" style="width:100%; height:100%; object-fit:cover; opacity:0.88;" />`;
     }
+
     mediaEl = `
       <div class="card-media-wrapper yt-wrapper" onclick="openWebsiteVideoModal('${playTarget}', '${escapeHTML(title)}', '', 0, '${escapeHTML(driveUrl)}')" style="cursor:pointer; background:#0F172A;" title="वेबसाइटवर व्हिडिओ पहा">
-        <img src="${thumbUrl}" alt="${escapeHTML(title)}" loading="lazy" onerror="this.src='/static/images/hero_wavelvadi.svg'" style="width:100%; height:100%; object-fit:cover; opacity:0.88;" />
+        ${thumbEl}
         <div class="yt-play-icon">
           <svg viewBox="0 0 68 48" style="width:48px; height:48px;">
             <path d="M66.52,7.74c-0.78-2.93-2.49-5.41-5.42-6.19C55.79,0.13,34,0,34,0S12.21,0.13,6.9,1.55 C3.97,2.33,2.27,4.81,1.48,7.74C0.06,13.05,0,24,0,24s0.06,10.95,1.48,16.26c0.78,2.93,2.49,5.41,5.42,6.19 C12.21,47.87,34,48,34,48s21.79-0.13,27.1-1.55c2.93-0.78,4.64-3.26,5.42-6.19C67.94,34.95,68,24,68,24S67.94,13.05,66.52,7.74z" fill="#DC2626"></path>
@@ -1625,7 +1632,7 @@ async function handleContentSubmit(e) {
       msgBox.innerText = `🎬 व्हिडिओ अपलोड सुरू होत आहे (${sizeMB} MB)...`;
 
       const uploadResult = await uploadMediaInChunks(file, (pct, current, total) => {
-        msgBox.innerText = `🎬 व्हिडिओ सुरक्षित Google Drive वर जात आहे (${pct}% - चंक ${current}/${total})... कृपया थांबा.`;
+        msgBox.innerText = `🎬 व्हिडिओ सुरक्षित सर्व्हर व क्लाउडवर जात आहे (${pct}% - चंक ${current}/${total})... कृपया थांबा.`;
       });
 
       // Remove binary file from formData so the final submit request is tiny (< 2 KB)
@@ -1640,7 +1647,7 @@ async function handleContentSubmit(e) {
       formData.set('backup_size', (uploadResult.file_size || file.size).toString());
 
       msgBox.style.color = '#059669';
-      msgBox.innerText = '✅ Google Drive वर सुरक्षित सेव्ह झाले! आता माहिती नोंदवली जात आहे...';
+      msgBox.innerText = '✅ व्हिडिओ सुरक्षित अपलोड झाला! आता माहिती नोंदवली जात आहे...';
     } else {
       msgBox.style.color = '#B45309';
       msgBox.innerText = '📤 मजकूर अपलोड होत आहे...';

@@ -1,4 +1,5 @@
 import os
+import threading
 import sqlite3
 import uuid
 import smtplib
@@ -456,6 +457,28 @@ def upload_to_google_drive(file_source, filename, mime_type):
 
     except Exception as e:
         return False, f"Upload error: {str(e)}"
+
+
+def async_backup_to_drive(file_bytes_or_str, filename, mime_type, content_id=None):
+    """Background worker to upload files to Google Drive without holding up web requests."""
+    if not GOOGLE_SCRIPT_URL:
+        return
+    try:
+        ok, res = upload_to_google_drive(file_bytes_or_str, filename, mime_type)
+        if ok and isinstance(res, dict):
+            drive_url = res.get('fileUrl') or res.get('viewUrl') or ''
+            if drive_url and content_id:
+                try:
+                    c_conn = get_db_connection()
+                    c_conn.execute("UPDATE content SET google_drive_url = ? WHERE id = ?", (drive_url, content_id))
+                    c_conn.execute("UPDATE backup_storage SET google_drive_url = ?, backup_status = 'synced' WHERE content_id = ?", (drive_url, content_id))
+                    c_conn.commit()
+                    c_conn.close()
+                    print(f"[ASYNC DRIVE] Content #{content_id} backed up to Google Drive: {drive_url}")
+                except Exception as db_err:
+                    print(f"[ASYNC DRIVE DB ERROR] {db_err}")
+    except Exception as e:
+        print(f"[ASYNC DRIVE ERROR] {e}")
 
 
 
@@ -1795,6 +1818,10 @@ def submit_content():
             preview_url = f"https://drive.google.com/file/d/{file_id}/preview"
             media_url = direct_url if media_type == 'image' else preview_url
 
+    direct_video_bytes = None
+    direct_video_name = None
+    direct_video_mime = None
+
     if 'media_file' in request.files:
         file = request.files['media_file']
         if file and file.filename and allowed_file(file.filename):
@@ -1823,35 +1850,18 @@ def submit_content():
                     'message': f'व्हिडिओ फाईल खूप मोठी आहे ({size_mb} MB). थेट व्हिडिओ अपलोडसाठी कमाल मर्यादा १० MB आहे. कृपया व्हिडिओ कॉम्प्रेश करा किंवा YouTube लिंक वापरा.'
                 }), 400
 
-            # Google Drive Cloud upload (Direct to Drive, fast, and resilient)
-            ok_drive = False
-            drive_res = None
-            if GOOGLE_SCRIPT_URL:
-                ok_drive, drive_res = upload_to_google_drive(file_bytes, unique_name, mime)
-
-            if ok_drive and isinstance(drive_res, dict):
-                file_id = drive_res.get('fileId', '')
-                google_drive_url = drive_res.get('fileUrl') or drive_res.get('viewUrl') or ''
-                direct_url = drive_res.get('directUrl') or (f"https://lh3.googleusercontent.com/d/{file_id}" if file_id else google_drive_url)
-                preview_url = drive_res.get('previewUrl') or (f"https://drive.google.com/file/d/{file_id}/preview" if file_id else google_drive_url)
-                media_url = direct_url if media_type == 'image' else preview_url
+            if media_type == 'video':
+                # Video will be stored directly into media_storage with content_id
+                direct_video_bytes = file_bytes
+                direct_video_name = unique_name
+                direct_video_mime = mime
+                media_url = '/api/video/pending'
                 saved_filepath = None
-            else:
-                # Safe fallback: if Google Drive script is delayed or unreachable, save without error
-                if media_type == 'image':
-                    opt_b64 = optimize_image_base64(file_bytes)
-                    if opt_b64 and len(opt_b64) < 1500000:
-                        media_url = opt_b64
-                        saved_filepath = None
-                    else:
-                        filepath = os.path.join(app.config['UPLOAD_FOLDER'], unique_name)
-                        try:
-                            with open(filepath, 'wb') as f:
-                                f.write(file_bytes)
-                            media_url = f"/uploads/{unique_name}"
-                            saved_filepath = filepath
-                        except Exception:
-                            media_url = '/static/images/hero_wavelvadi.svg'
+            elif media_type == 'image':
+                opt_b64 = optimize_image_base64(file_bytes)
+                if opt_b64 and len(opt_b64) < 1500000:
+                    media_url = opt_b64
+                    saved_filepath = None
                 else:
                     filepath = os.path.join(app.config['UPLOAD_FOLDER'], unique_name)
                     try:
@@ -1861,6 +1871,17 @@ def submit_content():
                         saved_filepath = filepath
                     except Exception:
                         media_url = '/static/images/hero_wavelvadi.svg'
+                if GOOGLE_SCRIPT_URL:
+                    threading.Thread(target=async_backup_to_drive, args=(file_bytes, unique_name, mime), daemon=True).start()
+            else:
+                filepath = os.path.join(app.config['UPLOAD_FOLDER'], unique_name)
+                try:
+                    with open(filepath, 'wb') as f:
+                        f.write(file_bytes)
+                    media_url = f"/uploads/{unique_name}"
+                    saved_filepath = filepath
+                except Exception:
+                    media_url = '/static/images/hero_wavelvadi.svg'
 
     if youtube_url:
         yt_match = re.search(r'(?:youtu\.be/|youtube(?:-nocookie)?\.com/(?:embed/|v/|watch\?v=|watch\?.+&v=|shorts/|live/))([\w-]{11})', youtube_url)
@@ -1884,6 +1905,7 @@ def submit_content():
         status = 'pending'
 
     conn = get_db_connection()
+    video_to_backup = None
     try:
         cursor = conn.cursor()
         cursor.execute('''
@@ -1896,38 +1918,69 @@ def submit_content():
               author_name, user_role, status, approval_token, creator_email))
         content_id = cursor.lastrowid
 
-        # If content was uploaded via chunked pipeline, link to media_storage for instant native streaming
+        # If content was uploaded via chunked pipeline or direct video, link to media_storage for instant native streaming
         upload_id = request.form.get('upload_id', '').strip()
+
         if upload_id:
             cursor.execute('SELECT full_data, filename, mime_type, file_size FROM upload_ready WHERE upload_id = ?', (upload_id,))
             ready_row = cursor.fetchone()
             if ready_row:
                 direct_stream_url = f"/api/video/{content_id}"
+                raw_chunk_bytes = ready_row['full_data']
                 if IS_POSTGRES:
                     cursor.execute('''
                         INSERT INTO media_storage (content_id, file_bytes, mime_type, filename, file_size)
                         VALUES (%s, %s, %s, %s, %s)
                         ON CONFLICT (content_id) DO UPDATE SET file_bytes = EXCLUDED.file_bytes
-                    ''', (content_id, ready_row['full_data'], ready_row['mime_type'], ready_row['filename'], ready_row['file_size']))
+                    ''', (content_id, raw_chunk_bytes, ready_row['mime_type'], ready_row['filename'], ready_row['file_size']))
                 else:
                     cursor.execute('''
                         INSERT OR REPLACE INTO media_storage (content_id, file_bytes, mime_type, filename, file_size)
                         VALUES (?, ?, ?, ?, ?)
-                    ''', (content_id, ready_row['full_data'], ready_row['mime_type'], ready_row['filename'], ready_row['file_size']))
+                    ''', (content_id, raw_chunk_bytes, ready_row['mime_type'], ready_row['filename'], ready_row['file_size']))
                 cursor.execute('DELETE FROM upload_ready WHERE upload_id = ?', (upload_id,))
                 cursor.execute('UPDATE content SET media_url = ?, media_type = ? WHERE id = ?', (direct_stream_url, 'video', content_id))
                 media_url = direct_stream_url
+                media_type = 'video'
+                raw_bytes_val = raw_chunk_bytes.tobytes() if isinstance(raw_chunk_bytes, memoryview) else bytes(raw_chunk_bytes)
+                video_to_backup = (raw_bytes_val, ready_row['filename'], ready_row['mime_type'])
+        elif direct_video_bytes:
+            direct_stream_url = f"/api/video/{content_id}"
+            if IS_POSTGRES:
+                cursor.execute('''
+                    INSERT INTO media_storage (content_id, file_bytes, mime_type, filename, file_size)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (content_id) DO UPDATE SET file_bytes = EXCLUDED.file_bytes
+                ''', (content_id, psycopg2.Binary(direct_video_bytes) if HAVE_PSYCOPG2 else direct_video_bytes, direct_video_mime, direct_video_name, len(direct_video_bytes)))
+            else:
+                cursor.execute('''
+                    INSERT OR REPLACE INTO media_storage (content_id, file_bytes, mime_type, filename, file_size)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (content_id, sqlite3.Binary(direct_video_bytes), direct_video_mime, direct_video_name, len(direct_video_bytes)))
+            cursor.execute('UPDATE content SET media_url = ?, media_type = ? WHERE id = ?', (direct_stream_url, 'video', content_id))
+            media_url = direct_stream_url
+            media_type = 'video'
+            video_to_backup = (direct_video_bytes, direct_video_name, direct_video_mime)
 
         # Add to backup_storage table
         if backup_filename:
             backup_status = 'synced' if google_drive_url else 'local'
-            storage_path = saved_filepath or '[Google Drive Cloud - Not Stored Locally]'
+            storage_path = saved_filepath or '[Media Storage Database Cloud]'
             cursor.execute('''
                 INSERT INTO backup_storage (content_id, original_filename, local_path, google_drive_url, file_size, file_type, backup_status)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             ''', (content_id, backup_filename, storage_path, google_drive_url or '', backup_size, media_type, backup_status))
 
         conn.commit()
+
+        if video_to_backup and GOOGLE_SCRIPT_URL:
+            v_bytes, v_name, v_mime = video_to_backup
+            threading.Thread(
+                target=async_backup_to_drive,
+                args=(v_bytes, v_name, v_mime, content_id),
+                daemon=True
+            ).start()
+
     except Exception as e:
         conn.rollback()
         return jsonify({'success': False, 'message': f'मजकूर जतन करताना त्रुटी आली: {str(e)}'}), 500
@@ -2390,26 +2443,16 @@ def upload_chunk():
     finally:
         conn_ready.close()
 
-    # Upload the assembled video to Google Drive via Google Apps Script (from python server)
-    ok_drive, drive_res = upload_to_google_drive(bytes(full_bytes), unique_filename, mime_type)
-    file_id = ''
-    view_url = ''
-    direct_url = ''
-    preview_url = ''
-    if ok_drive and isinstance(drive_res, dict):
-        file_id = drive_res.get('fileId', '')
-        view_url = drive_res.get('fileUrl') or drive_res.get('viewUrl') or ''
-        direct_url = drive_res.get('directUrl') or (f"https://lh3.googleusercontent.com/d/{file_id}" if file_id else view_url)
-        preview_url = drive_res.get('previewUrl') or (f"https://drive.google.com/file/d/{file_id}/preview" if file_id else view_url)
-
+    # Video is cached in upload_ready and will be committed to media_storage upon metadata submit.
+    # We return immediately to bypass Vercel 10s serverless timeout completely!
     return jsonify({
         'success': True,
         'completed': True,
         'upload_id': upload_id,
-        'file_id': file_id,
-        'file_url': view_url,
-        'preview_url': preview_url,
-        'direct_url': direct_url,
+        'file_id': '',
+        'file_url': '',
+        'preview_url': '',
+        'direct_url': '',
         'file_size': total_size,
         'filename': unique_filename
     })
@@ -2417,17 +2460,41 @@ def upload_chunk():
 
 @app.route('/api/video/<int:content_id>', methods=['GET'])
 def stream_content_video(content_id):
-    """Streams stored video natively for HTML5 video player."""
+    """Streams stored video natively for HTML5 video player with HTTP 206 Range support."""
     conn = get_db_connection()
     try:
         cur = conn.cursor()
         cur.execute('SELECT file_bytes, mime_type FROM media_storage WHERE content_id = ?', (content_id,))
         row = cur.fetchone()
         if row and row['file_bytes']:
-            raw_bytes = bytes(row['file_bytes'])
-            return Response(raw_bytes, mimetype=row['mime_type'] or 'video/mp4', headers={
+            raw_data = row['file_bytes']
+            raw_bytes = raw_data.tobytes() if isinstance(raw_data, memoryview) else bytes(raw_data)
+            total_len = len(raw_bytes)
+            mimetype = row['mime_type'] or 'video/mp4'
+
+            # Support HTTP Range requests (essential for iOS Safari, Chrome video seek, and smart caching)
+            range_header = request.headers.get('Range', None)
+            if range_header:
+                match = re.match(r'bytes=(\d+)-(\d*)', range_header)
+                if match:
+                    start = int(match.group(1))
+                    end_str = match.group(2)
+                    end = int(end_str) if end_str else total_len - 1
+                    end = min(end, total_len - 1)
+                    if start <= end and start < total_len:
+                        chunk = raw_bytes[start:end + 1]
+                        return Response(chunk, status=206, mimetype=mimetype, headers={
+                            'Content-Range': f'bytes {start}-{end}/{total_len}',
+                            'Accept-Ranges': 'bytes',
+                            'Content-Length': str(len(chunk)),
+                            'Content-Type': mimetype,
+                            'Cache-Control': 'public, max-age=86400'
+                        })
+
+            return Response(raw_bytes, mimetype=mimetype, headers={
                 'Accept-Ranges': 'bytes',
-                'Content-Length': str(len(raw_bytes)),
+                'Content-Length': str(total_len),
+                'Content-Type': mimetype,
                 'Cache-Control': 'public, max-age=86400'
             })
 
