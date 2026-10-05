@@ -1490,50 +1490,55 @@ async function deleteBackupRecord(backupId) {
 // ==========================================
 // CONTENT SUBMISSION (ADMIN & CREATOR)
 // ==========================================
-function readFileAsBase64(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = reader.result || '';
-      const commaIdx = result.indexOf(',');
-      if (commaIdx !== -1) {
-        resolve(result.slice(commaIdx + 1));
-      } else {
-        resolve(result);
-      }
-    };
-    reader.onerror = (err) => reject(err);
-    reader.readAsDataURL(file);
-  });
-}
+async function uploadMediaInChunks(file, onProgress) {
+  const CHUNK_SIZE = 2 * 1024 * 1024; // 2 MB chunks (safely under Vercel's 4.5 MB limit)
+  const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+  const uploadId = 'up_' + Date.now() + '_' + Math.random().toString(36).substring(2, 9);
 
-async function uploadDirectToGoogleDrive(file, scriptUrl, scriptSecret) {
-  const base64Data = await readFileAsBase64(file);
-  const payload = {
-    action: 'upload',
-    apiKey: scriptSecret,
-    data: base64Data,
-    fileName: file.name,
-    mimeType: file.type || 'video/mp4'
-  };
+  for (let i = 0; i < totalChunks; i++) {
+    const start = i * CHUNK_SIZE;
+    const end = Math.min(file.size, start + CHUNK_SIZE);
+    const chunkBlob = file.slice(start, end);
 
-  const res = await fetch(scriptUrl, {
-    method: 'POST',
-    body: JSON.stringify(payload),
-    headers: {
-      'Content-Type': 'text/plain;charset=utf-8'
+    const fd = new FormData();
+    fd.append('upload_id', uploadId);
+    fd.append('chunk_index', i);
+    fd.append('total_chunks', totalChunks);
+    fd.append('filename', file.name);
+    fd.append('mime_type', file.type || 'video/mp4');
+    fd.append('chunk_file', chunkBlob, file.name);
+
+    if (onProgress) {
+      const pct = Math.round((i / totalChunks) * 100);
+      onProgress(pct, i + 1, totalChunks);
     }
-  });
 
-  if (!res.ok) {
-    throw new Error(`Google Apps Script HTTP Error: ${res.status}`);
+    const res = await fetch('/api/upload-chunk', {
+      method: 'POST',
+      body: fd
+    });
+
+    if (!res.ok) {
+      let errMsg = `सर्व्हर त्रुटी HTTP ${res.status}`;
+      try {
+        const errJson = await res.json();
+        if (errJson.message) errMsg = errJson.message;
+      } catch {}
+      throw new Error(errMsg);
+    }
+
+    const result = await res.json();
+    if (!result.success) {
+      throw new Error(result.message || 'चंक अपलोड अयशस्वी झाले.');
+    }
+
+    if (result.completed) {
+      if (onProgress) onProgress(100, totalChunks, totalChunks);
+      return result;
+    }
   }
 
-  const data = await res.json();
-  if (!data || !data.success) {
-    throw new Error((data && data.error) || 'Google Drive वर फाईल अपलोड अयशस्वी झाली.');
-  }
-  return data;
+  throw new Error('अपलोड प्रक्रिया पूर्ण झाली नाही.');
 }
 
 async function handleContentSubmit(e) {
@@ -1574,53 +1579,28 @@ async function handleContentSubmit(e) {
   }
 
   try {
-    // If a video or large file (> 3 MB) is selected, upload directly to Google Drive
-    // via Google Apps Script to bypass Vercel's strict 4.5 MB request payload limit.
-    const isLargeMedia = file && (isVideo || file.size > 3 * 1024 * 1024);
+    // If a video or file > 2.5 MB is selected, upload via chunked streaming
+    // to bypass Vercel's 4.5 MB request limit and avoid any browser 404/CORS errors!
+    const needsChunkedUpload = file && (isVideo || file.size > 2.5 * 1024 * 1024);
 
-    if (isLargeMedia) {
+    if (needsChunkedUpload) {
       msgBox.style.color = '#B45309';
-      msgBox.innerText = `☁️ मोठा व्हिडिओ थेट Google Drive वर सुरक्षित अपलोड होत आहे (${sizeMB} MB)... कृपया थांबा.`;
+      msgBox.innerText = `🎬 व्हिडिओ अपलोड सुरू होत आहे (${sizeMB} MB)...`;
 
-      let uploadConfig = null;
-      try {
-        const cfgRes = await fetch('/api/upload-config');
-        uploadConfig = await cfgRes.json();
-      } catch (cfgErr) {
-        console.warn('Could not fetch upload-config:', cfgErr);
-      }
+      const uploadResult = await uploadMediaInChunks(file, (pct, current, total) => {
+        msgBox.innerText = `🎬 व्हिडिओ सुरक्षित Google Drive वर जात आहे (${pct}% - चंक ${current}/${total})... कृपया थांबा.`;
+      });
 
-      if (uploadConfig && uploadConfig.google_script_url) {
-        try {
-          const driveRes = await uploadDirectToGoogleDrive(
-            file,
-            uploadConfig.google_script_url,
-            uploadConfig.google_script_secret || ''
-          );
+      // Remove binary file from formData so the final submit request is tiny (< 2 KB)
+      formData.delete('media_file');
+      formData.set('google_drive_url', uploadResult.file_url || '');
+      formData.set('media_url', uploadResult.preview_url || uploadResult.direct_url || uploadResult.file_url || '');
+      formData.set('media_type', isVideo ? 'video' : 'image');
+      formData.set('backup_filename', uploadResult.filename || file.name);
+      formData.set('backup_size', (uploadResult.file_size || file.size).toString());
 
-          // Remove the binary file from FormData so Vercel receives only tiny metadata (< 2 KB)
-          formData.delete('media_file');
-          formData.set('google_drive_url', driveRes.fileUrl || driveRes.viewUrl || '');
-          formData.set('media_url', driveRes.previewUrl || driveRes.directUrl || driveRes.fileUrl || '');
-          formData.set('media_type', isVideo ? 'video' : 'image');
-          formData.set('backup_filename', file.name);
-          formData.set('backup_size', file.size.toString());
-
-          msgBox.style.color = '#059669';
-          msgBox.innerText = '✅ Google Drive वर व्हिडिओ सुरक्षित झाला! आता माहिती सेव्ह होत आहे...';
-        } catch (driveErr) {
-          console.error('Direct Google Drive upload error:', driveErr);
-          if (file.size > 4 * 1024 * 1024) {
-            msgBox.style.color = '#DC2626';
-            msgBox.innerText = `⚠️ Google Drive वर व्हिडिओ अपलोड करताना त्रुटी आली (${driveErr.message || 'Timeout'}). कृपया थोड्या वेळाने प्रयत्न करा किंवा YouTube लिंक वापरा.`;
-            if (submitBtn) {
-              submitBtn.disabled = false;
-              submitBtn.innerText = '📤 कंटेंट सबमिट करा';
-            }
-            return;
-          }
-        }
-      }
+      msgBox.style.color = '#059669';
+      msgBox.innerText = '✅ Google Drive वर सुरक्षित सेव्ह झाले! आता माहिती नोंदवली जात आहे...';
     } else {
       msgBox.style.color = '#B45309';
       msgBox.innerText = '📤 मजकूर अपलोड होत आहे...';

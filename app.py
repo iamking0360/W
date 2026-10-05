@@ -8,6 +8,8 @@ import re
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime
+import datetime
+import time
 from functools import wraps
 import requests
 import urllib3
@@ -15,7 +17,7 @@ from flask import Flask, render_template, request, jsonify, session, send_from_d
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 from dotenv import load_dotenv
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 
 # Optional PostgreSQL drivers
 try:
@@ -829,6 +831,43 @@ def init_db():
         )
     ''')
 
+    # Chunked video upload table (for seamless large video reassembly)
+    byte_type = "BYTEA" if IS_POSTGRES else "BLOB"
+    cursor.execute(f'''
+        CREATE TABLE IF NOT EXISTS upload_chunks (
+            upload_id VARCHAR(100) NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            total_chunks INTEGER NOT NULL,
+            chunk_data {byte_type} NOT NULL,
+            filename VARCHAR(255),
+            mime_type VARCHAR(100),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (upload_id, chunk_index)
+        )
+    ''')
+
+    # Cyber defense and threat protection logs
+    cursor.execute(f'''
+        CREATE TABLE IF NOT EXISTS security_logs (
+            id {id_type},
+            ip_address VARCHAR(100) NOT NULL,
+            attack_type VARCHAR(100) NOT NULL,
+            payload TEXT,
+            endpoint VARCHAR(255),
+            action_taken VARCHAR(100) DEFAULT 'BLOCKED',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS banned_ips (
+            ip_address VARCHAR(100) PRIMARY KEY,
+            reason TEXT NOT NULL,
+            banned_until TIMESTAMP NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
     # Ensure ADMIN user exists
     cursor.execute('SELECT * FROM users WHERE username = ?', (ADMIN_ID,))
     admin_user = cursor.fetchone()
@@ -869,9 +908,145 @@ def ensure_db_initialized():
         except Exception as e:
             print(f"[DB INIT ERROR] Could not initialize database schema: {e}")
 
+# ==========================================
+# CYBERSHIELD: AUTONOMOUS CYBER DEFENSE SYSTEM
+# ==========================================
+# Blocks SQL Injection, XSS, Path Traversal, Bot scanners, and Brute-force attacks
+SUSPICIOUS_PATTERNS = [
+    # SQL Injection signatures
+    re.compile(r"(\b(union(\s+all)?\s+select|select\s+.*\s+from|insert\s+into|delete\s+from|drop\s+(table|database)|alter\s+table|exec(\s|\+)+(s|x)p_)\b)", re.IGNORECASE),
+    re.compile(r"('|\%27)\s*(\bor\b|\band\b)\s*('?1'?\s*=\s*'?1|'?a'?\s*=\s*'?a')", re.IGNORECASE),
+    re.compile(r"(\b(sleep|benchmark)\s*\(\s*\d+\s*\))", re.IGNORECASE),
+    re.compile(r"(--|#|/\*|\*/)\s*$", re.IGNORECASE),
+    # Path traversal signatures
+    re.compile(r"(\.\./|\.\.\\|%2e%2e%2f|%2e%2e\/|\/etc\/passwd|\/windows\/system32)", re.IGNORECASE),
+    # XSS / Malicious script injection signatures
+    re.compile(r"(<script[\s>]|javascript:|onload\s*=|onerror\s*=|onclick\s*=|eval\s*\(|<iframe[\s>])", re.IGNORECASE),
+    # Malicious server probe signatures
+    re.compile(r"(\.env|wp-admin|phpmyadmin|xmlrpc\.php|\.git\/HEAD|\.aws\/|actuator\/health)", re.IGNORECASE)
+]
+
+_banned_ips_cache = {}  # ip: ban_expiry_timestamp
+_failed_login_attempts = {}  # ip: [timestamp1, timestamp2, ...]
+
+def get_client_ip():
+    """Gets real client IP address behind reverse proxies (Vercel, Cloudflare, etc.)."""
+    if request.headers.get('x-forwarded-for'):
+        return request.headers.get('x-forwarded-for').split(',')[0].strip()
+    if request.headers.get('x-real-ip'):
+        return request.headers.get('x-real-ip').strip()
+    return request.remote_addr or '127.0.0.1'
+
+def is_ip_banned(ip):
+    now = time.time()
+    if ip in _banned_ips_cache:
+        if now < _banned_ips_cache[ip]:
+            return True
+        else:
+            del _banned_ips_cache[ip]
+    return False
+
+def ban_ip(ip, reason="Cyber attack detected", duration_seconds=1800):
+    expiry = time.time() + duration_seconds
+    _banned_ips_cache[ip] = expiry
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        expiry_dt = datetime.datetime.fromtimestamp(expiry)
+        if IS_POSTGRES:
+            cursor.execute('''
+                INSERT INTO banned_ips (ip_address, reason, banned_until)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (ip_address) DO UPDATE SET reason = EXCLUDED.reason, banned_until = EXCLUDED.banned_until
+            ''', (ip, reason, expiry_dt))
+        else:
+            cursor.execute('''
+                INSERT OR REPLACE INTO banned_ips (ip_address, reason, banned_until)
+                VALUES (?, ?, ?)
+            ''', (ip, reason, expiry_dt))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+    print(f"[CYBERSHIELD] [BLOCKED] AUTO-BANNED IP: {ip} for {duration_seconds}s. Reason: {reason}")
+
+def log_security_event(ip, attack_type, payload, endpoint):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        if IS_POSTGRES:
+            cursor.execute('''
+                INSERT INTO security_logs (ip_address, attack_type, payload, endpoint, action_taken)
+                VALUES (%s, %s, %s, %s, 'BLOCKED')
+            ''', (ip, attack_type, payload[:500], endpoint))
+        else:
+            cursor.execute('''
+                INSERT INTO security_logs (ip_address, attack_type, payload, endpoint, action_taken)
+                VALUES (?, ?, ?, ?, 'BLOCKED')
+            ''', (ip, attack_type, payload[:500], endpoint))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+def inspect_request_for_attacks():
+    """Inspects incoming requests and blocks active cyber attacks automatically."""
+    ip = get_client_ip()
+
+    if is_ip_banned(ip):
+        return jsonify({
+            'success': False,
+            'message': '🛡️ प्रवेश नाकारला: संशयास्पद हालचालींमुळे आपला IP वावेलवाडी सायबर डिफेन्स प्रणालीद्वारे तात्पुरता ब्लॉक केला आहे.'
+        }), 403
+
+    path = unquote(request.path)
+    if path.startswith('/static/'):
+        return None
+
+    raw_query = unquote(request.query_string.decode('utf-8', errors='ignore'))
+    to_scan = [path, raw_query]
+    try:
+        if request.is_json:
+            j = request.get_json(silent=True)
+            if j and isinstance(j, dict):
+                to_scan.extend(unquote(str(v)) for v in j.values() if isinstance(v, (str, int, float)))
+        elif request.form:
+            for k, v in request.form.items():
+                to_scan.append(unquote(str(k)))
+                to_scan.append(unquote(str(v)))
+    except Exception:
+        pass
+
+    combined_text = " ".join(to_scan)
+
+    for pat in SUSPICIOUS_PATTERNS:
+        match = pat.search(combined_text)
+        if match:
+            matched_pattern = match.group(0)
+            log_security_event(ip, "ATTACK_SIGNATURE", matched_pattern, path)
+            ban_ip(ip, f"Malicious pattern: {matched_pattern[:50]}", duration_seconds=1800)
+            return jsonify({
+                'success': False,
+                'message': '🛡️ सायबर सुरक्षा अलर्ट: संशयास्पद किंवा असुरक्षित कोड आढळल्यामुळे विनंती तात्काळ ब्लॉक केली आहे.'
+            }), 403
+
+    return None
+
 @app.before_request
-def auto_init_database():
+def auto_init_database_and_security():
     ensure_db_initialized()
+    attack_res = inspect_request_for_attacks()
+    if attack_res:
+        return attack_res
+
+@app.after_request
+def add_cyber_security_headers(response):
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'SAMEORIGIN'
+    response.headers['X-XSS-Protection'] = '1; mode=block'
+    response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    response.headers['Permissions-Policy'] = 'geolocation=(), camera=(), microphone=()'
+    return response
 
 # Attempt eager initialization
 ensure_db_initialized()
@@ -1122,6 +1297,13 @@ def get_db_status():
 
 @app.route('/api/login', methods=['POST'])
 def login():
+    client_ip = get_client_ip()
+    if is_ip_banned(client_ip):
+        return jsonify({
+            'success': False,
+            'message': '🛡️ प्रवेश नाकारला: वारंवार चुकीच्या पासवर्ड प्रयत्नांमुळे आपला IP तात्पुरता ब्लॉक केला आहे.'
+        }), 403
+
     data = request.get_json() or {}
     username = data.get('username', '').strip()
     password = data.get('password', '').strip()
@@ -1129,15 +1311,26 @@ def login():
     if not username or not password:
         return jsonify({'success': False, 'message': 'Username and password are required.'}), 400
 
+    def record_failed_login():
+        _failed_login_attempts.setdefault(client_ip, [])
+        _failed_login_attempts[client_ip].append(time.time())
+        # Filter attempts within last 15 minutes
+        _failed_login_attempts[client_ip] = [t for t in _failed_login_attempts[client_ip] if time.time() - t < 900]
+        if len(_failed_login_attempts[client_ip]) >= 5:
+            ban_ip(client_ip, f"Brute force login attack on user: {username}", duration_seconds=900)
+            log_security_event(client_ip, "BRUTE_FORCE", f"5 failed logins for {username}", "/api/login")
+
     if username in [ADMIN_ID, 'ADMIN', 'admin']:
         valid_passwords = {ADMIN_PASSWORD, os.getenv('KING_ADMIN_PASSWORD', ''), os.getenv('ADMIN_PASSWORD', ''), 'AdminWavelvadiPass2026!'}
         valid_passwords.discard('')
         if password in valid_passwords:
+            _failed_login_attempts.pop(client_ip, None)
             session['user_id'] = 0
             session['username'] = 'ADMIN'
             session['role'] = 'ADMIN'
             return jsonify({'success': True, 'message': 'Welcome ADMIN! Authentication successful.', 'role': 'ADMIN'})
         else:
+            record_failed_login()
             return jsonify({'success': False, 'message': 'Invalid ADMIN password.'}), 401
 
     conn = get_db_connection()
@@ -1148,11 +1341,13 @@ def login():
         if user['status'] != 'approved':
             return jsonify({'success': False, 'message': 'Your creator account is pending approval by ADMIN.'}), 403
 
+        _failed_login_attempts.pop(client_ip, None)
         session['user_id'] = user['id']
         session['username'] = user['username']
         session['role'] = user['role']
         return jsonify({'success': True, 'message': f'Welcome back, {user["username"]}!', 'role': user['role']})
 
+    record_failed_login()
     return jsonify({'success': False, 'message': 'Invalid username or password.'}), 401
 
 
@@ -2013,6 +2208,176 @@ def get_upload_config():
         'google_script_secret': GOOGLE_SCRIPT_SECRET,
         'max_video_size_mb': 10
     })
+
+
+@app.route('/api/upload-chunk', methods=['POST'])
+@login_required
+def upload_chunk():
+    """
+    Receives file chunks (up to 2.5 MB each) from Creators or ADMIN.
+    Reassembles them safely, then uploads the complete video to Google Drive via Google Apps Script.
+    This completely bypasses Vercel's 4.5 MB request limit and browser CORS/404 issues!
+    """
+    upload_id = request.form.get('upload_id', '').strip()
+    chunk_index_raw = request.form.get('chunk_index')
+    total_chunks_raw = request.form.get('total_chunks')
+    filename = secure_filename(request.form.get('filename', 'video.mp4'))
+    mime_type = request.form.get('mime_type', 'video/mp4')
+
+    if not upload_id or chunk_index_raw is None or total_chunks_raw is None:
+        return jsonify({'success': False, 'message': 'Invalid chunk upload parameters.'}), 400
+
+    try:
+        chunk_index = int(chunk_index_raw)
+        total_chunks = int(total_chunks_raw)
+    except ValueError:
+        return jsonify({'success': False, 'message': 'Invalid chunk indices.'}), 400
+
+    chunk_file = request.files.get('chunk_file')
+    if not chunk_file:
+        return jsonify({'success': False, 'message': 'Missing chunk file data.'}), 400
+
+    chunk_bytes = chunk_file.read()
+    if len(chunk_bytes) > 4 * 1024 * 1024:
+        return jsonify({'success': False, 'message': 'चंक ४ MB पेक्षा मोठा आहे.'}), 400
+
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        # Clean any old orphaned chunks older than 2 hours
+        try:
+            if IS_POSTGRES:
+                cursor.execute("DELETE FROM upload_chunks WHERE created_at < NOW() - INTERVAL '2 hours'")
+            else:
+                cursor.execute("DELETE FROM upload_chunks WHERE created_at < datetime('now', '-2 hours')")
+        except Exception:
+            pass
+
+        # Store chunk in upload_chunks table
+        if IS_POSTGRES:
+            cursor.execute('''
+                INSERT INTO upload_chunks (upload_id, chunk_index, total_chunks, chunk_data, filename, mime_type)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (upload_id, chunk_index) DO UPDATE SET chunk_data = EXCLUDED.chunk_data
+            ''', (upload_id, chunk_index, total_chunks, psycopg2.Binary(chunk_bytes) if HAVE_PSYCOPG2 else chunk_bytes, filename, mime_type))
+        else:
+            cursor.execute('''
+                INSERT OR REPLACE INTO upload_chunks (upload_id, chunk_index, total_chunks, chunk_data, filename, mime_type)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (upload_id, chunk_index, total_chunks, sqlite3.Binary(chunk_bytes), filename, mime_type))
+        conn.commit()
+
+        # Check if all chunks have arrived
+        if IS_POSTGRES:
+            cursor.execute('SELECT COUNT(*) as cnt FROM upload_chunks WHERE upload_id = %s', (upload_id,))
+        else:
+            cursor.execute('SELECT COUNT(*) as cnt FROM upload_chunks WHERE upload_id = ?', (upload_id,))
+        count_row = cursor.fetchone()
+        received_count = count_row['cnt'] if count_row else 0
+
+        if received_count < total_chunks:
+            return jsonify({
+                'success': True,
+                'completed': False,
+                'chunk_index': chunk_index,
+                'received_chunks': received_count,
+                'total_chunks': total_chunks
+            })
+
+        # All chunks received! Reassemble in memory
+        if IS_POSTGRES:
+            cursor.execute('SELECT chunk_data FROM upload_chunks WHERE upload_id = %s ORDER BY chunk_index ASC', (upload_id,))
+        else:
+            cursor.execute('SELECT chunk_data FROM upload_chunks WHERE upload_id = ? ORDER BY chunk_index ASC', (upload_id,))
+        all_chunk_rows = cursor.fetchall()
+
+        full_bytes = bytearray()
+        for row in all_chunk_rows:
+            cdata = row['chunk_data']
+            if isinstance(cdata, memoryview):
+                full_bytes.extend(cdata.tobytes())
+            elif isinstance(cdata, (bytes, bytearray)):
+                full_bytes.extend(cdata)
+            else:
+                full_bytes.extend(bytes(cdata))
+
+        # Immediately delete chunk records to free database memory
+        if IS_POSTGRES:
+            cursor.execute('DELETE FROM upload_chunks WHERE upload_id = %s', (upload_id,))
+        else:
+            cursor.execute('DELETE FROM upload_chunks WHERE upload_id = ?', (upload_id,))
+        conn.commit()
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify({'success': False, 'message': f'चंक जतन करताना त्रुटी: {str(e)}'}), 500
+    finally:
+        conn.close()
+
+    total_size = len(full_bytes)
+    # Strict 10 MB limit check
+    if total_size > 10 * 1024 * 1024:
+        return jsonify({
+            'success': False,
+            'message': f'व्हिडिओ १० MB पेक्षा मोठा आहे ({round(total_size / (1024*1024), 2)} MB). कमाल मर्यादा १० MB आहे.'
+        }), 400
+
+    unique_filename = f"{uuid.uuid4().hex[:8]}_{filename}"
+
+    # Upload the assembled video to Google Drive via Google Apps Script (from python server)
+    ok_drive, drive_res = upload_to_google_drive(bytes(full_bytes), unique_filename, mime_type)
+    if ok_drive and isinstance(drive_res, dict):
+        file_id = drive_res.get('fileId', '')
+        view_url = drive_res.get('fileUrl') or drive_res.get('viewUrl') or ''
+        direct_url = drive_res.get('directUrl') or (f"https://lh3.googleusercontent.com/d/{file_id}" if file_id else view_url)
+        preview_url = drive_res.get('previewUrl') or (f"https://drive.google.com/file/d/{file_id}/preview" if file_id else view_url)
+
+        return jsonify({
+            'success': True,
+            'completed': True,
+            'file_id': file_id,
+            'file_url': view_url,
+            'preview_url': preview_url,
+            'direct_url': direct_url,
+            'file_size': total_size,
+            'filename': unique_filename
+        })
+    else:
+        err_msg = drive_res if isinstance(drive_res, str) else 'Google Drive upload error'
+        return jsonify({
+            'success': False,
+            'message': f'Google Drive वर व्हिडिओ साठवताना अडचण आली: {err_msg}'
+        }), 502
+
+
+@app.route('/api/admin/security-status', methods=['GET'])
+@admin_required
+def get_security_status():
+    """Provides cyber defense status, threat logs, and banned IPs list for ADMIN."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) as count FROM security_logs')
+        count_row = cursor.fetchone()
+        total_blocked = count_row['count'] if count_row else 0
+
+        cursor.execute('SELECT * FROM security_logs ORDER BY id DESC LIMIT 10')
+        recent_attacks = [dict(r) for r in cursor.fetchall()]
+
+        cursor.execute('SELECT * FROM banned_ips ORDER BY created_at DESC LIMIT 10')
+        banned = [dict(r) for r in cursor.fetchall()]
+
+        return jsonify({
+            'success': True,
+            'cyber_shield_active': True,
+            'total_blocked_attacks': total_blocked,
+            'recent_attacks': recent_attacks,
+            'banned_ips': banned
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'message': str(e)}), 500
+    finally:
+        conn.close()
 
 
 @app.route('/api/admin/google-script/test', methods=['GET', 'POST'])
