@@ -107,7 +107,7 @@ if IS_POSTGRES:
 else:
     print(f"[DB INFO] PostgreSQL URL not configured. Using local SQLite: {DATABASE_PATH}")
 
-ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp', 'mp4', 'webm', 'mov', 'pdf', 'doc', 'docx'}
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'mp4', 'webm', 'mov', 'mkv', 'avi', 'm4v', '3gp', 'ogg', 'ogv', 'pdf', 'doc', 'docx'}
 
 # ADMIN details
 ADMIN_ID = os.getenv('ADMIN_ID', os.getenv('KING_ADMIN_ID', 'ADMIN'))
@@ -410,25 +410,24 @@ def upload_to_google_drive(file_source, filename, mime_type):
         if '/folders/' in folder_id:
             folder_id = folder_id.split('/folders/')[-1].split('/')[0].split('?')[0]
 
+        # Compact single-data payload to prevent memory/payload blowup on videos
         payload = {
             'action': 'upload',
             'apiKey': GOOGLE_SCRIPT_SECRET,
             'data': encoded_bytes,
-            'fileData': encoded_bytes,
-            'file': encoded_bytes,
             'filename': filename,
             'fileName': filename,
-            'name': filename,
             'mimeType': mime_type,
-            'type': mime_type,
-            'folderId': folder_id,
-            'folder': folder_id
+            'folderId': folder_id
         }
 
+        # Generous timeout for video uploads
+        req_timeout = 90 if mime_type.startswith('video/') else 25
+
         try:
-            res = requests.post(GOOGLE_SCRIPT_URL, json=payload, timeout=20)
+            res = requests.post(GOOGLE_SCRIPT_URL, json=payload, timeout=req_timeout)
         except requests.exceptions.SSLError:
-            res = requests.post(GOOGLE_SCRIPT_URL, json=payload, verify=False, timeout=20)
+            res = requests.post(GOOGLE_SCRIPT_URL, json=payload, verify=False, timeout=req_timeout)
 
         if res.status_code == 200:
             try:
@@ -1575,10 +1574,10 @@ def submit_content():
             filename = secure_filename(file.filename)
             unique_name = f"{uuid.uuid4().hex[:8]}_{filename}"
             ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
-            if ext in {'mp4', 'webm', 'mov'}:
+            if ext in {'mp4', 'webm', 'mov', 'mkv', 'avi', 'm4v', '3gp', 'ogg', 'ogv'}:
                 media_type = 'video'
-                mime = 'video/' + ('mp4' if ext == 'mov' else ext)
-            elif ext in {'jpg', 'jpeg', 'png', 'gif'}:
+                mime = 'video/' + ('mp4' if ext in {'mov', 'mkv', 'avi', 'm4v', '3gp'} else ext)
+            elif ext in {'jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'}:
                 media_type = 'image'
                 mime = f'image/{ext}'
             else:
@@ -1604,10 +1603,20 @@ def submit_content():
                 saved_filepath = None
             else:
                 # Safe fallback: if Google Drive script is delayed or unreachable, save without error
-                opt_b64 = optimize_image_base64(file_bytes) if media_type == 'image' else None
-                if opt_b64 and len(opt_b64) < 1500000:
-                    media_url = opt_b64
-                    saved_filepath = None
+                if media_type == 'image':
+                    opt_b64 = optimize_image_base64(file_bytes)
+                    if opt_b64 and len(opt_b64) < 1500000:
+                        media_url = opt_b64
+                        saved_filepath = None
+                    else:
+                        filepath = os.path.join(app.config['UPLOAD_FOLDER'], unique_name)
+                        try:
+                            with open(filepath, 'wb') as f:
+                                f.write(file_bytes)
+                            media_url = f"/uploads/{unique_name}"
+                            saved_filepath = filepath
+                        except Exception:
+                            media_url = '/static/images/hero_wavelvadi.svg'
                 else:
                     filepath = os.path.join(app.config['UPLOAD_FOLDER'], unique_name)
                     try:
@@ -1953,7 +1962,7 @@ def update_drive_url(backup_id):
 
 @app.route('/uploads/<filename>')
 def uploaded_file(filename):
-    return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+    return send_from_directory(app.config['UPLOAD_FOLDER'], filename, conditional=True)
 
 
 @app.route('/api/admin/google-script-config', methods=['GET'])

@@ -439,28 +439,25 @@ function createCardHTML(item) {
       </div>`;
   } else if (item.media_type === 'video') {
     let videoSrc = item.media_url || item.google_drive_url;
+    let thumbUrl = '/static/images/hero_wavelvadi.svg';
+    let playTarget = videoSrc;
     if (videoSrc && (videoSrc.includes('drive.google.com') || hasDrive)) {
       let dUrl = item.google_drive_url || videoSrc;
       let fileIdMatch = dUrl.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || dUrl.match(/id=([a-zA-Z0-9_-]+)/);
-      let embedUrl = fileIdMatch ? `https://drive.google.com/file/d/${fileIdMatch[1]}/preview` : dUrl;
-      mediaEl = `
-        <div class="card-media-wrapper yt-wrapper" onclick="openWebsiteVideoModal('${embedUrl}', '${escapeHTML(title)}')" title="वेबसाइटवर व्हिडिओ पहा">
-          <iframe src="${embedUrl}" allow="autoplay; fullscreen" style="width:100%; height:100%; border:none;"></iframe>
-          <span class="media-badge">VIDEO</span>
-        </div>`;
-    } else if (videoSrc && videoSrc.startsWith('/uploads/')) {
-      mediaEl = `
-        <div class="card-media-wrapper" onclick="openWebsiteVideoModal('${videoSrc}', '${escapeHTML(title)}')" style="cursor:pointer;" title="वेबसाइटवर व्हिडिओ पहा">
-          <video src="${videoSrc}" controls preload="metadata" style="width:100%; height:100%; object-fit:cover;"></video>
-          <span class="media-badge">VIDEO</span>
-        </div>`;
-    } else {
-      mediaEl = `
-        <div class="card-media-wrapper">
-          <img src="/static/images/hero_wavelvadi.svg" alt="${escapeHTML(title)}" loading="lazy" />
-          <span class="media-badge">VIDEO</span>
-        </div>`;
+      playTarget = fileIdMatch ? `https://drive.google.com/file/d/${fileIdMatch[1]}/preview` : dUrl;
+      thumbUrl = fileIdMatch ? `https://lh3.googleusercontent.com/d/${fileIdMatch[1]}` : thumbUrl;
     }
+    mediaEl = `
+      <div class="card-media-wrapper yt-wrapper" onclick="openWebsiteVideoModal('${playTarget}', '${escapeHTML(title)}')" style="cursor:pointer; background:#0F172A;" title="वेबसाइटवर व्हिडिओ पहा">
+        <img src="${thumbUrl}" alt="${escapeHTML(title)}" loading="lazy" onerror="this.src='/static/images/hero_wavelvadi.svg'" style="width:100%; height:100%; object-fit:cover; opacity:0.88;" />
+        <div class="yt-play-icon">
+          <svg viewBox="0 0 68 48" style="width:48px; height:48px;">
+            <path d="M66.52,7.74c-0.78-2.93-2.49-5.41-5.42-6.19C55.79,0.13,34,0,34,0S12.21,0.13,6.9,1.55 C3.97,2.33,2.27,4.81,1.48,7.74C0.06,13.05,0,24,0,24s0.06,10.95,1.48,16.26c0.78,2.93,2.49,5.41,5.42,6.19 C12.21,47.87,34,48,34,48s21.79-0.13,27.1-1.55c2.93-0.78,4.64-3.26,5.42-6.19C67.94,34.95,68,24,68,24S67.94,13.05,66.52,7.74z" fill="#DC2626"></path>
+            <path d="M 45,24 27,14 27,34" fill="#ffffff"></path>
+          </svg>
+        </div>
+        <span class="media-badge">VIDEO</span>
+      </div>`;
   } else {
     let imgSrc = item.media_url || '/static/images/hero_wavelvadi.svg';
     if (imgSrc && imgSrc.includes('drive.google.com')) {
@@ -581,10 +578,17 @@ function openWebsiteVideoModal(source, title, watchUrl, startTime) {
   } else if (source && (source.includes('drive.google.com') || source.match(/\/file\/d\/[a-zA-Z0-9_-]+/))) {
     const m = source.match(/\/file\/d\/([a-zA-Z0-9_-]+)/) || source.match(/id=([a-zA-Z0-9_-]+)/);
     const dEmbed = m ? `https://drive.google.com/file/d/${m[1]}/preview` : source;
-    frameContainer.innerHTML = `<iframe src="${dEmbed}" allow="autoplay; fullscreen" style="border:none;"></iframe>`;
+    frameContainer.innerHTML = `<iframe src="${dEmbed}" allow="autoplay; fullscreen" style="width:100%; height:100%; min-height:400px; border:none; border-radius:8px;"></iframe>`;
+    if (directBtn) {
+      directBtn.href = m ? `https://drive.google.com/file/d/${m[1]}/view` : source;
+      directBtn.innerText = '📁 Google Drive वर पहा';
+      directBtn.style.display = 'inline-flex';
+    }
+  } else if (source && (source.endsWith('.mp4') || source.endsWith('.webm') || source.endsWith('.mov') || source.startsWith('/uploads/') || source.startsWith('data:video/'))) {
+    frameContainer.innerHTML = `<video src="${source}" controls autoplay style="width:100%; height:100%; max-height:480px; object-fit:contain; border-radius:8px;"></video>`;
     if (directBtn) directBtn.style.display = 'none';
-  } else if (source && (source.endsWith('.mp4') || source.startsWith('/uploads/'))) {
-    frameContainer.innerHTML = `<video src="${source}" controls autoplay style="width:100%; height:100%; object-fit:contain;"></video>`;
+  } else if (source) {
+    frameContainer.innerHTML = `<video src="${source}" controls autoplay style="width:100%; height:100%; max-height:480px; object-fit:contain; border-radius:8px;"></video>`;
     if (directBtn) directBtn.style.display = 'none';
   }
 
@@ -1490,6 +1494,16 @@ async function handleContentSubmit(e) {
   const form = document.getElementById('addContentForm');
   const formData = new FormData(form);
   const msgBox = document.getElementById('submitMsg');
+  const fileInput = document.getElementById('mediaFileInput');
+  const file = fileInput ? fileInput.files[0] : null;
+  const submitBtn = form.querySelector('button[type="submit"]');
+
+  // File size validation (max 45MB)
+  if (file && file.size > 45 * 1024 * 1024) {
+    msgBox.style.color = '#DC2626';
+    msgBox.innerText = '⚠️ फाइल खूप मोठी आहे (कमाल मर्यादा ४५ MB). कृपया फाइल लहान करा किंवा YouTube लिंक जोडा.';
+    return;
+  }
 
   // Add publish_now from checkbox
   const publishCheck = document.getElementById('publishNowCheck');
@@ -1497,15 +1511,31 @@ async function handleContentSubmit(e) {
     formData.set('publish_now', 'true');
   }
 
+  const isVideo = file && (file.type.startsWith('video/') || /\.(mp4|webm|mov|mkv|avi|m4v|3gp)$/i.test(file.name));
+  const sizeMB = file ? (file.size / (1024 * 1024)).toFixed(1) : 0;
+
   msgBox.style.color = '#B45309';
-  msgBox.innerText = 'कंटेंट अपलोड होत आहे...';
+  msgBox.innerText = isVideo 
+    ? `🎬 व्हिडिओ अपलोड होत आहे (${sizeMB} MB)... कृपया थोडा वेळ थांबा.` 
+    : '📤 मजकूर अपलोड होत आहे...';
+
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.innerText = '⏳ अपलोड होत आहे...';
+  }
 
   try {
     const res = await fetch('/api/content/submit', {
       method: 'POST',
       body: formData
     });
-    const data = await res.json();
+
+    let data;
+    try {
+      data = await res.json();
+    } catch {
+      data = { success: false, message: res.status === 413 ? 'फाइल खूप मोठी आहे (Payload Too Large).' : `सर्व्हर त्रुटी: HTTP ${res.status}` };
+    }
 
     if (data.success) {
       msgBox.style.color = 'green';
@@ -1518,11 +1548,16 @@ async function handleContentSubmit(e) {
       }, 1500);
     } else {
       msgBox.style.color = 'red';
-      msgBox.innerText = data.message;
+      msgBox.innerText = data.message || 'अपलोड अयशस्वी झाले.';
     }
   } catch (err) {
     msgBox.style.color = 'red';
-    msgBox.innerText = 'Error uploading content. Please try again.';
+    msgBox.innerText = 'अपलोड करताना त्रुटी आली. इंटरनेट तपासा आणि पुन्हा प्रयत्न करा.';
+  } finally {
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.innerText = '📤 कंटेंट सबमिट करा';
+    }
   }
 }
 
